@@ -365,7 +365,8 @@ Section 11. The keys recognized for each adapter are:
 - `tracker.linear` (see Section 11.3):
   - `endpoint`, `api_key`, `project_slug`
 - `tracker.jira` (see Section 11.4):
-  - `base_url`, `email`, `api_token`, `jql`
+  - `base_url`, `email`, `api_token`, `jql`, `priority_map` (OPTIONAL; see Section 11.4 for
+    semantics)
 
 For backward compatibility with `tracker.kind == "linear"` configurations written before this
 specification version, flat keys (`tracker.endpoint`, `tracker.api_key`, `tracker.project_slug`) MAY
@@ -580,7 +581,7 @@ Validation checks:
 - All adapter-required fields for the selected `tracker.kind` are present after `$` resolution
   (see the adapter section for the selected kind in Section 11). Examples:
   - `linear`: `api_key`, `project_slug`
-  - `jira`: `base_url`, `email`, `api_token`, `jql`
+  - `jira`: `base_url`, `email`, `api_token`, `jql`; `priority_map` is OPTIONAL (see Section 11.4)
 - `codex.command` is present and non-empty.
 
 ### 6.4 Core Config Fields Summary (Cheat Sheet)
@@ -599,6 +600,7 @@ not require recognizing or validating extension fields unless that extension is 
 - `tracker.jira.email`: string or `$VAR`, REQUIRED when `tracker.kind=jira`
 - `tracker.jira.api_token`: string or `$VAR`, canonical env `JIRA_API_TOKEN`, REQUIRED when `tracker.kind=jira`
 - `tracker.jira.jql`: string, REQUIRED when `tracker.kind=jira`; raw JQL string used for candidate selection
+- `tracker.jira.priority_map`: map of string -> positive integer, OPTIONAL when `tracker.kind=jira`; resolves custom priority scheme names per Section 11.4
 - `polling.interval_ms`: integer, default `30000`
 - `workspace.root`: path resolved to absolute, default `<system-temp>/symphony_workspaces`
 - `hooks.after_create`: shell script or null
@@ -1189,6 +1191,14 @@ REQUIRED read operations:
    - Returned issues SHOULD include at least `id`, `identifier`, and `state`.
    - Missing IDs are silently omitted from the result rather than producing an error.
 
+Concurrency and statefulness:
+
+- Adapters MUST be safe for concurrent calls from multiple orchestrator tasks. The orchestrator may
+  invoke read operations from polling, reconciliation, and dispatch loops simultaneously, on the
+  same adapter instance, against the same or different issues.
+- Adapters SHOULD be stateless apart from connection pools and credential caches. Adapters MUST NOT
+  cache issue state across operations; every read fetches authoritative state from the tracker.
+
 OPTIONAL write operations (NOT used by the orchestration loop; defined solely so adapters MAY
 expose them to the coding agent as client-side tools — see Section 11.6 for the orchestrator
 boundary):
@@ -1229,6 +1239,15 @@ PR-link surface:
   - Jira Cloud: remote issue link via `POST /rest/api/3/issue/{issueIdOrKey}/remotelink`.
   Neither operation is invoked by the orchestrator and neither is REQUIRED for conformance.
 
+Contract versioning:
+
+- The TrackerAdapter contract is versioned together with this specification (see Section 1 /
+  document version). Adapters MAY expose adapter-specific operations beyond the contract surface in
+  this section, but conforming orchestrator code MUST NOT depend on adapter-specific operations.
+- Future revisions of this contract MAY add new optional operations; adapters predating the
+  addition remain conforming and SHOULD return a `not_implemented` error for unknown operations
+  rather than silently no-op.
+
 ### 11.2 Normalized Issue Model
 
 All adapters MUST produce issues that conform to Section 4.1.1.
@@ -1247,8 +1266,19 @@ Cross-adapter symmetry notes:
   templates SHOULD NOT assume `branch_name` is present.
 - `blocked_by` is populated when the tracker exposes a "blocked-by" relation (Linear does via inverse
   relations of type `blocks`; Jira does via `Blocks` issue links). If the tracker does not expose
-  such a relation, the adapter MUST return `blocked_by = []`. The `Todo`-state blocker rule in
-  Section 8.2 still applies, but is a no-op when `blocked_by` is empty.
+  such a relation, the adapter MUST return `blocked_by = []`. Adapters that cannot expose blocker
+  relations (`blocked_by` always empty) will never gate dispatch on blocker state; operators who
+  rely on blocker-gating MUST use a tracker adapter that populates `blocked_by`.
+
+Nullable fields and template safety:
+
+- Normalized fields documented as adapter-conditional (e.g., `branch_name`, `priority` under custom
+  Jira schemes) MAY be `null`. Workflow templates referencing such fields MUST either guard with
+  `{% if issue.branch_name %}` or expect empty-string rendering on adapters that return null. The
+  reference Liquid renderer treats nil field access as empty string; it does NOT raise.
+- Adapters MUST enumerate their nullable-field set in their adapter section: Linear (Section 11.3) —
+  none. Jira (Section 11.4) — `branch_name` (always), `priority` (when project uses a non-default
+  scheme without a configured `tracker.jira.priority_map`).
 
 ### 11.3 Linear Adapter (`tracker.kind == "linear"`)
 
@@ -1286,6 +1316,8 @@ Normalized field mapping (Linear field -> normalized field):
 - `labels.nodes[].name` -> `labels` (lowercased)
 - inverse relations of type `blocks` -> `blocked_by`
 - `createdAt` / `updatedAt` -> `created_at` / `updated_at`
+
+Nullable fields: none.
 
 State transitions (`update_issue_state`):
 
@@ -1327,6 +1359,8 @@ Configuration (under `tracker.jira` in `WORKFLOW.md`):
   `https://id.atlassian.com/manage-profile/security/api-tokens`.
 - `jql` (string) — REQUIRED. Raw JQL string evaluated for candidate selection. See "Issue selection"
   below.
+- `priority_map` (map of string -> positive integer) — OPTIONAL. Resolves custom Jira priority
+  scheme names to the normalized integer priority. See "Normalized field mapping" below.
 
 Transport:
 
@@ -1343,12 +1377,23 @@ Issue selection input:
 - The adapter issues `GET /rest/api/3/search/jql` (Jira Cloud's enhanced JQL search endpoint) with
   `jql=<configured-jql>` and a `fields` selector that requests at minimum the fields needed to
   populate the normalized issue model (see "Normalized field mapping" below).
-- Pagination: follow Jira's `nextPageToken` paging contract on the same endpoint. The adapter
-  continues paging until `nextPageToken` is absent.
+- Pagination. The adapter sends `nextPageToken=<token>` as a query parameter on follow-up requests.
+  The first request omits the parameter. The adapter reads the next token from the response body's
+  top-level `nextPageToken` field. Pagination terminates when `nextPageToken` is absent from the
+  response (the older `isLast` field is ignored for the `/search/jql` endpoint). Implementations
+  SHOULD set a reasonable `maxResults` (e.g., 100) per request; adapters MUST NOT assume Jira
+  honors arbitrarily large values.
 - The orchestrator still applies `tracker.active_states` filtering against normalized `state` after
   the adapter returns. The JQL is the broad candidate filter; `active_states` is the precise
   dispatch gate. Operators SHOULD ensure their JQL is at least as wide as `active_states` to avoid
   surprises.
+
+Issue lookup by id (`fetch_issue_states_by_ids`):
+
+- `issue_ids` are Jira **issue keys** (e.g., `ENG-123`). The adapter fetches state per key using
+  `GET /rest/api/3/issue/{key}?fields=status`, or batches via
+  `GET /rest/api/3/search/jql?jql=key in (KEY-1, KEY-2)&fields=status` when more than one key is
+  requested.
 
 Normalized field mapping (Jira field -> normalized field):
 
@@ -1367,13 +1412,32 @@ Normalized field mapping (Jira field -> normalized field):
 - `fields.priority.name` -> `priority` mapping. Jira's priority is a name, not a number. The adapter
   MUST map `Highest -> 1`, `High -> 2`, `Medium -> 3`, `Low -> 4`, `Lowest -> 5`, and unknown names
   to `null`, so the normalized `priority` integer ordering in Section 8.2 still works.
+  - Custom priority schemes. Jira Cloud projects may configure non-default priority schemes (e.g.,
+    `P0/P1/P2`, `Blocker/Critical/Major/Minor/Trivial`). Two behaviors are SPEC-conforming:
+    - Default behavior (no operator action): unknown priority names normalize to `null`, and
+      Section 8.2 dispatch ordering degenerates to oldest-creation-time for affected issues.
+    - Operator opt-in: the operator MAY supply `tracker.jira.priority_map` in `WORKFLOW.md` — a map
+      from priority name (case-sensitive, as it appears in Jira) to integer (lower is higher
+      priority). The adapter resolves each issue's priority through this map; names absent from
+      the map still normalize to `null`. Example:
+      `{ "P0": 1, "P1": 2, "P2": 3, "P3": 4 }`.
 - `fields.status.name` -> `state`
 - (none) -> `branch_name` (always `null`; Jira has no native branch-name field)
 - `<base_url>/browse/<key>` -> `url`
 - `fields.labels` -> `labels` (lowercased)
-- `fields.issuelinks` with type name `Blocks` and inward direction -> `blocked_by`. Each blocker ref
-  uses the linked issue's `id`, `key`, and `fields.status.name`.
+- `fields.issuelinks` -> `blocked_by`. For each entry in `fields.issuelinks` where
+  `type.name == "Blocks"`:
+  - If the entry has `inwardIssue` set and `type.inward == "is blocked by"`, the issue identified
+    by `inwardIssue.key` is treated as a `blocked_by` blocker of the current issue.
+  - If the entry has `outwardIssue` set and `type.outward == "blocks"`, the current issue blocks
+    `outwardIssue.key`; this direction is NOT recorded in `blocked_by`.
+  The adapter MUST consult both `type.inward` and `type.outward` strings; do not infer direction
+  from sub-field presence alone. Each blocker ref uses the linked issue's `id`, `key`, and
+  `fields.status.name`.
 - `fields.created` / `fields.updated` -> `created_at` / `updated_at`
+
+Nullable fields: `branch_name` (always); `priority` (when the project uses a non-default priority
+scheme without a configured `tracker.jira.priority_map`).
 
 State transitions (`update_issue_state`):
 
@@ -1462,14 +1526,12 @@ Rate limits and operational notes:
   `https://developer.atlassian.com/cloud/jira/platform/rate-limiting/`. Symphony does not impose a
   client-side rate limiter and treats `429` and `503 Retry-After` as transport-level errors subject
   to normal retry behavior. Implementations MAY honor `Retry-After` when present.
-- The Jira ADF format is rich enough to express formatted bodies. The adapter's `create_comment`
-  contract intentionally stays plain text to preserve symmetry with the Linear adapter; implementors
-  may add a richer extension surface in a future revision.
 
-Worked example (candidate fetch):
+Worked example (candidate fetch; omit `nextPageToken` on the first request, include it on
+subsequent requests once a token is known):
 
 ```http
-GET /rest/api/3/search/jql?jql=project%20%3D%20ENG%20AND%20statusCategory%20!%3D%20Done&fields=summary,description,priority,status,labels,issuelinks,created,updated&nextPageToken= HTTP/1.1
+GET /rest/api/3/search/jql?jql=project%20%3D%20ENG%20AND%20statusCategory%20!%3D%20Done&fields=summary,description,priority,status,labels,issuelinks,created,updated HTTP/1.1
 Host: acme.atlassian.net
 Authorization: Basic <base64(email:api_token)>
 Accept: application/json
