@@ -16,8 +16,8 @@ behavior.
 ## 1. Problem Statement
 
 Symphony is a long-running automation service that continuously reads work from an issue tracker
-(Linear in this specification version), creates an isolated workspace for each issue, and runs a
-coding agent session for that issue inside the workspace.
+(Linear and Jira Cloud in this specification version), creates an isolated workspace for each issue,
+and runs a coding agent session for that issue inside the workspace.
 
 The service solves four operational problems:
 
@@ -129,15 +129,17 @@ Symphony is easiest to port when kept in these layers:
 4. `Execution Layer` (workspace + agent subprocess)
    - Filesystem lifecycle, workspace preparation, coding-agent protocol.
 
-5. `Integration Layer` (Linear adapter)
+5. `Integration Layer` (tracker adapters)
    - API calls and normalization for tracker data.
+   - One adapter per supported tracker kind (Linear, Jira Cloud). All adapters produce the same
+     normalized issue model defined in Section 4.1.1.
 
 6. `Observability Layer` (logs + OPTIONAL status surface)
    - Operator visibility into orchestrator and agent behavior.
 
 ### 3.3 External Dependencies
 
-- Issue tracker API (Linear for `tracker.kind: linear` in this specification version).
+- Issue tracker API (Linear for `tracker.kind: linear`; Jira Cloud REST v3 for `tracker.kind: jira`).
 - Local filesystem for workspaces and logs.
 - OPTIONAL workspace population tooling (for example Git CLI, if used).
 - Coding-agent executable that supports the targeted Codex app-server mode.
@@ -345,23 +347,31 @@ Note:
 
 #### 5.3.1 `tracker` (object)
 
-Fields:
+Common fields (apply to every adapter):
 
 - `kind` (string)
   - REQUIRED for dispatch.
-  - Current supported value: `linear`
-- `endpoint` (string)
-  - Default for `tracker.kind == "linear"`: `https://api.linear.app/graphql`
-- `api_key` (string)
-  - MAY be a literal token or `$VAR_NAME`.
-  - Canonical environment variable for `tracker.kind == "linear"`: `LINEAR_API_KEY`.
-  - If `$VAR_NAME` resolves to an empty string, treat the key as missing.
-- `project_slug` (string)
-  - REQUIRED for dispatch when `tracker.kind == "linear"`.
+  - Supported values: `linear`, `jira`.
 - `active_states` (list of strings)
   - Default: `Todo`, `In Progress`
+  - Compared after `lowercase` normalization against the adapter's normalized state names.
 - `terminal_states` (list of strings)
   - Default: `Closed`, `Cancelled`, `Canceled`, `Duplicate`, `Done`
+  - Compared after `lowercase` normalization against the adapter's normalized state names.
+
+Adapter-specific fields nest under `tracker.<kind>` and are documented in the adapter sections of
+Section 11. The keys recognized for each adapter are:
+
+- `tracker.linear` (see Section 11.3):
+  - `endpoint`, `api_key`, `project_slug`
+- `tracker.jira` (see Section 11.4):
+  - `base_url`, `email`, `api_token`, `jql`
+
+For backward compatibility with `tracker.kind == "linear"` configurations written before this
+specification version, flat keys (`tracker.endpoint`, `tracker.api_key`, `tracker.project_slug`) MAY
+be accepted as synonyms for the corresponding `tracker.linear.*` fields when `tracker.kind ==
+"linear"`. Implementations SHOULD prefer the nested form and MAY emit a deprecation warning when the
+flat form is used.
 
 #### 5.3.2 `polling` (object)
 
@@ -475,7 +485,7 @@ Template input variables:
 Fallback prompt behavior:
 
 - If the workflow prompt body is empty, the runtime MAY use a minimal default prompt
-  (`You are working on an issue from Linear.`).
+  (`You are working on an issue from the configured tracker.`).
 - Workflow file read/parse failures are configuration/validation errors and SHOULD NOT silently fall
   back to a prompt.
 
@@ -560,8 +570,10 @@ Validation checks:
 
 - Workflow file can be loaded and parsed.
 - `tracker.kind` is present and supported.
-- `tracker.api_key` is present after `$` resolution.
-- `tracker.project_slug` is present when REQUIRED by the selected tracker kind.
+- All adapter-required fields for the selected `tracker.kind` are present after `$` resolution
+  (see the adapter section for the selected kind in Section 11). Examples:
+  - `linear`: `api_key`, `project_slug`
+  - `jira`: `base_url`, `email`, `api_token`, `jql`
 - `codex.command` is present and non-empty.
 
 ### 6.4 Core Config Fields Summary (Cheat Sheet)
@@ -570,12 +582,16 @@ This section is intentionally redundant so a coding agent can implement the conf
 Extension fields are documented in the extension section that defines them. Core conformance does
 not require recognizing or validating extension fields unless that extension is implemented.
 
-- `tracker.kind`: string, REQUIRED, currently `linear`
-- `tracker.endpoint`: string, default `https://api.linear.app/graphql` when `tracker.kind=linear`
-- `tracker.api_key`: string or `$VAR`, canonical env `LINEAR_API_KEY` when `tracker.kind=linear`
-- `tracker.project_slug`: string, REQUIRED when `tracker.kind=linear`
+- `tracker.kind`: string, REQUIRED, one of `linear`, `jira`
 - `tracker.active_states`: list of strings, default `["Todo", "In Progress"]`
 - `tracker.terminal_states`: list of strings, default `["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]`
+- `tracker.linear.endpoint`: string, default `https://api.linear.app/graphql` (when `tracker.kind=linear`)
+- `tracker.linear.api_key`: string or `$VAR`, canonical env `LINEAR_API_KEY`, REQUIRED when `tracker.kind=linear`
+- `tracker.linear.project_slug`: string, REQUIRED when `tracker.kind=linear`
+- `tracker.jira.base_url`: string or `$VAR`, REQUIRED when `tracker.kind=jira` (e.g. `https://acme.atlassian.net`)
+- `tracker.jira.email`: string or `$VAR`, REQUIRED when `tracker.kind=jira`
+- `tracker.jira.api_token`: string or `$VAR`, canonical env `JIRA_API_TOKEN`, REQUIRED when `tracker.kind=jira`
+- `tracker.jira.jql`: string, REQUIRED when `tracker.kind=jira`; raw JQL string used for candidate selection
 - `polling.interval_ms`: integer, default `30000`
 - `workspace.root`: path resolved to absolute, default `<system-temp>/symphony_workspaces`
 - `hooks.after_create`: shell script or null
@@ -1130,74 +1146,332 @@ Note:
 
 - Workspaces are intentionally preserved after successful runs.
 
-## 11. Issue Tracker Integration Contract (Linear-Compatible)
+## 11. Issue Tracker Integration Contract
 
-### 11.1 REQUIRED Operations
+Symphony talks to issue trackers through a pluggable `TrackerAdapter` contract. Each supported
+tracker kind ships an adapter that implements the same contract and produces the same normalized
+issue shape. The orchestrator, polling loop, reconciliation, and observability code MUST NOT depend
+on the selected tracker kind.
 
-An implementation MUST support these tracker adapter operations:
+Currently specified adapters:
 
-1. `fetch_candidate_issues()`
-   - Return issues in configured active states for a configured project.
+- Linear (Section 11.3) — `tracker.kind == "linear"`
+- Jira Cloud (Section 11.4) — `tracker.kind == "jira"`
 
-2. `fetch_issues_by_states(state_names)`
-   - Used for startup terminal cleanup.
+### 11.1 TrackerAdapter Contract
 
-3. `fetch_issue_states_by_ids(issue_ids)`
-   - Used for active-run reconciliation.
+An adapter is a value with the operations below. Operation signatures are written in language-neutral
+pseudocode; the unit of exchange between the adapter and the orchestrator is the normalized issue
+model from Section 4.1.1.
 
-### 11.2 Query Semantics (Linear)
+REQUIRED read operations:
 
-Linear-specific requirements for `tracker.kind == "linear"`:
+1. `fetch_candidate_issues() -> {ok, [Issue]} | {error, ErrorClass}`
+   - Returns issues that are dispatch candidates per the adapter's configured selection input.
+   - Each returned issue's `state` MUST be set so the orchestrator can apply `active_states` /
+     `terminal_states` filtering after `lowercase` normalization.
+   - Pagination is the adapter's responsibility; the caller sees a single fully-paginated list.
 
-- `tracker.kind == "linear"`
-- GraphQL endpoint (default `https://api.linear.app/graphql`)
-- Auth token sent in `Authorization` header
-- `tracker.project_slug` maps to Linear project `slugId`
-- Candidate issue query filters project using `project: { slugId: { eq: $projectSlug } }`
-- Issue-state refresh query uses GraphQL issue IDs with variable type `[ID!]`
-- Pagination REQUIRED for candidate issues
-- Page size default: `50`
-- Network timeout: `30000 ms`
+2. `fetch_issues_by_states(state_names) -> {ok, [Issue]} | {error, ErrorClass}`
+   - Used during startup terminal workspace cleanup (Section 8.6).
+   - `state_names` is the list of configured terminal states.
+   - An empty `state_names` list SHOULD short-circuit to `{ok, []}` without an API call.
 
-Important:
+3. `fetch_issue_states_by_ids(issue_ids) -> {ok, [Issue]} | {error, ErrorClass}`
+   - Used during active-run reconciliation (Section 8.5).
+   - Returned issues SHOULD include at least `id`, `identifier`, and `state`.
+   - Missing IDs are silently omitted from the result rather than producing an error.
+
+OPTIONAL write operations (NOT used by the orchestration loop; available as a tool surface for the
+coding agent or future first-class write features — see Section 11.6):
+
+4. `create_comment(issue_id, body) -> ok | {error, ErrorClass}`
+   - Post a plain-text comment on the issue.
+   - The adapter is responsible for wrapping `body` into any tracker-required document format (for
+     example, Atlassian Document Format for Jira) without changing the caller's contract.
+
+5. `update_issue_state(issue_id, state_name) -> ok | {error, ErrorClass}`
+   - Move the issue to the named state.
+   - The adapter is responsible for translating `state_name` into whatever underlying mechanism the
+     tracker requires (direct state assignment for Linear; transition-by-target-state-name for Jira).
+   - If `state_name` does not correspond to a reachable state from the current state, return
+     `{error, state_transition_not_available}` rather than guessing.
+   - If `state_name` is ambiguous (more than one transition would reach a state with that name),
+     return `{error, state_transition_ambiguous}` rather than guessing.
+
+Rationale for "name a target state, let the adapter resolve the path":
+
+- Linear allows direct state assignment, so resolution is trivial.
+- Jira requires an intermediate transition step. Naming the transition explicitly in `WORKFLOW.md`
+  would leak Jira-specific concepts into the contract; naming the target state is the lowest common
+  vocabulary. Reversible: a future revision MAY add `update_issue_via_transition(issue_id,
+  transition_name)` as a second, adapter-specific entry point without breaking existing callers.
+
+PR-link surface:
+
+- Associating a pull-request URL with a tracker issue is OPTIONAL. When implemented, adapters
+  expose it as a `link_pr(issue_id, pr_url, title?) -> ok | {error, ErrorClass}` operation that the
+  agent toolchain may invoke. Implementation differs per tracker:
+  - Linear: native attachment via the GraphQL `attachmentLinkURL` mutation.
+  - Jira Cloud: remote issue link via `POST /rest/api/3/issue/{issueIdOrKey}/remotelink`.
+  Neither operation is invoked by the orchestrator and neither is REQUIRED for conformance.
+
+### 11.2 Normalized Issue Model
+
+All adapters MUST produce issues that conform to Section 4.1.1.
+
+Common normalization rules (apply to every adapter):
+
+- `labels` -> lowercase strings.
+- `priority` -> integer only (non-integers become `null`).
+- `created_at` and `updated_at` -> ISO-8601 timestamps; absent fields become `null`.
+- `state` -> the tracker's human-visible state name as a string (no enum coercion).
+
+Cross-adapter symmetry notes:
+
+- `branch_name` is populated by adapters whose tracker provides per-issue branch metadata (Linear
+  does). Adapters whose tracker does not (Jira Cloud) MUST set `branch_name = null`. Workflow
+  templates SHOULD NOT assume `branch_name` is present.
+- `blocked_by` is populated when the tracker exposes a "blocked-by" relation (Linear does via inverse
+  relations of type `blocks`; Jira does via `Blocks` issue links). If the tracker does not expose
+  such a relation, the adapter MUST return `blocked_by = []`. The `Todo`-state blocker rule in
+  Section 8.2 still applies, but is a no-op when `blocked_by` is empty.
+
+### 11.3 Linear Adapter (`tracker.kind == "linear"`)
+
+Configuration (under `tracker.linear` in `WORKFLOW.md`; flat `tracker.endpoint`, `tracker.api_key`,
+`tracker.project_slug` accepted as backward-compatible synonyms per Section 5.3.1):
+
+- `endpoint` (string) — default `https://api.linear.app/graphql`
+- `api_key` (string or `$VAR`) — REQUIRED. Canonical env var: `LINEAR_API_KEY`. Sent in the
+  `Authorization` request header.
+- `project_slug` (string) — REQUIRED. Maps to Linear project `slugId`.
+
+Transport:
+
+- GraphQL over HTTPS.
+- Network timeout: `30000 ms`.
+- Pagination REQUIRED for candidate issues; page size default `50`.
+
+Issue selection input:
+
+- Implicit. Candidates are all issues in `tracker.linear.project_slug` whose state name is in
+  `tracker.active_states`.
+- Candidate query filters the project with `project: { slugId: { eq: $projectSlug } }`.
+- Issue-state refresh query uses GraphQL ID typing (`[ID!]`).
+
+Normalized field mapping (Linear field -> normalized field):
+
+- `id` -> `id`
+- `identifier` -> `identifier` (e.g. `ABC-123`)
+- `title` -> `title`
+- `description` -> `description`
+- `priority` -> `priority`
+- `state.name` -> `state`
+- `branchName` -> `branch_name`
+- `url` -> `url`
+- `labels.nodes[].name` -> `labels` (lowercased)
+- inverse relations of type `blocks` -> `blocked_by`
+- `createdAt` / `updatedAt` -> `created_at` / `updated_at`
+
+State transitions (`update_issue_state`):
+
+- Resolve the workflow's target state name to a Linear `WorkflowState` ID scoped to the issue's team
+  (`team.states(filter: {name: {eq: $stateName}}, first: 1)`).
+- Call `issueUpdate(id: $issueId, input: {stateId: $stateId})`.
+- If no state with the requested name exists on the team, return
+  `{error, state_transition_not_available}`.
+
+Comments (`create_comment`):
+
+- Call `commentCreate(input: {issueId: $issueId, body: $body})`. Linear accepts Markdown directly.
+
+PR links (`link_pr`, OPTIONAL):
+
+- Call Linear `attachmentLinkURL` or `attachmentCreate` with the PR URL. Recommended title shape:
+  `<issue.identifier>: <pr_title>` when `pr_title` is supplied.
+
+Rate limits and operational notes:
 
 - Linear GraphQL schema details can drift. Keep query construction isolated and test the exact query
   fields/types REQUIRED by this specification.
+- Linear rate-limit behavior is documented by Linear; Symphony does not impose a client-side rate
+  limiter and treats `429` as a transport-level error subject to normal retry behavior.
 
-A non-Linear implementation MAY change transport details, but the normalized outputs MUST match the
-domain model in Section 4.
+### 11.4 Jira Cloud Adapter (`tracker.kind == "jira"`)
 
-### 11.3 Normalization Rules
+Scope: Jira Cloud only. Jira Server and Jira Data Center are out of scope for this specification
+version.
 
-Candidate issue normalization SHOULD produce fields listed in Section 4.1.1.
+Configuration (under `tracker.jira` in `WORKFLOW.md`):
 
-Additional normalization details:
+- `base_url` (string or `$VAR`) — REQUIRED. The Jira Cloud site root, e.g. `https://acme.atlassian.net`.
+  Trailing slash is tolerated. The adapter appends `/rest/api/3/...` for REST calls.
+- `email` (string or `$VAR`) — REQUIRED. The Atlassian account email associated with the API token.
+- `api_token` (string or `$VAR`) — REQUIRED. Canonical env var: `JIRA_API_TOKEN`. Created via
+  `https://id.atlassian.com/manage-profile/security/api-tokens`.
+- `jql` (string) — REQUIRED. Raw JQL string evaluated for candidate selection. See "Issue selection"
+  below.
 
-- `labels` -> lowercase strings
-- `blocked_by` -> derived from inverse relations where relation type is `blocks`
-- `priority` -> integer only (non-integers become null)
-- `created_at` and `updated_at` -> parse ISO-8601 timestamps
+Transport:
 
-### 11.4 Error Handling Contract
+- HTTPS REST. Jira Cloud REST API v3 is the targeted version.
+- Authentication: HTTP Basic, with `Authorization: Basic base64(email + ":" + api_token)`. Tokens
+  MUST NOT appear in logs.
+- Network timeout: `30000 ms` (matches Linear adapter default).
+- Pagination REQUIRED for candidate issues.
 
-RECOMMENDED error categories:
+Issue selection input:
+
+- `tracker.jira.jql` is a raw JQL string written by the operator. Symphony does NOT synthesize JQL.
+- Example: `project = ENG AND statusCategory != Done AND assignee = currentUser()`.
+- The adapter issues `GET /rest/api/3/search/jql` (Jira Cloud's enhanced JQL search endpoint) with
+  `jql=<configured-jql>` and a `fields` selector that requests at minimum the fields needed to
+  populate the normalized issue model (see "Normalized field mapping" below).
+- Pagination: follow Jira's `nextPageToken` paging contract on the same endpoint. The adapter
+  continues paging until `nextPageToken` is absent.
+- The orchestrator still applies `tracker.active_states` filtering against normalized `state` after
+  the adapter returns. The JQL is the broad candidate filter; `active_states` is the precise
+  dispatch gate. Operators SHOULD ensure their JQL is at least as wide as `active_states` to avoid
+  surprises.
+
+Normalized field mapping (Jira field -> normalized field):
+
+- `key` -> `identifier` (e.g. `ENG-123`)
+- `id` -> `id`
+- `fields.summary` -> `title`
+- `fields.description` -> `description` (Jira returns ADF; the adapter MAY extract plain text or
+  pass the ADF document through as a string — implementations SHOULD document the chosen behavior)
+- `fields.priority.name` -> `priority` mapping. Jira's priority is a name, not a number. The adapter
+  MUST map `Highest -> 1`, `High -> 2`, `Medium -> 3`, `Low -> 4`, `Lowest -> 5`, and unknown names
+  to `null`, so the normalized `priority` integer ordering in Section 8.2 still works.
+- `fields.status.name` -> `state`
+- (none) -> `branch_name` (always `null`; Jira has no native branch-name field)
+- `<base_url>/browse/<key>` -> `url`
+- `fields.labels` -> `labels` (lowercased)
+- `fields.issuelinks` with type name `Blocks` and inward direction -> `blocked_by`. Each blocker ref
+  uses the linked issue's `id`, `key`, and `fields.status.name`.
+- `fields.created` / `fields.updated` -> `created_at` / `updated_at`
+
+State transitions (`update_issue_state`):
+
+- `GET /rest/api/3/issue/{key}/transitions` to enumerate transitions available from the issue's
+  current state.
+- Find the transition whose `to.name` matches the requested target state name (case-insensitive).
+- If exactly one match: `POST /rest/api/3/issue/{key}/transitions` with `{"transition": {"id":
+  "<id>"}}`. Return `ok`.
+- If zero matches: return `{error, state_transition_not_available}`.
+- If more than one match: return `{error, state_transition_ambiguous}`. Operators MUST NOT rely on
+  the adapter guessing when a Jira project has duplicate transition target names.
+
+Comments (`create_comment`):
+
+- `POST /rest/api/3/issue/{key}/comment`.
+- Caller passes a plain-text `body`. The adapter wraps it into Atlassian Document Format
+  automatically:
+
+  ```json
+  {
+    "body": {
+      "type": "doc",
+      "version": 1,
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [{"type": "text", "text": "<body>"}]
+        }
+      ]
+    }
+  }
+  ```
+
+- The contract surface remains plain text; ADF is an adapter implementation detail.
+
+PR links (`link_pr`, OPTIONAL):
+
+- `POST /rest/api/3/issue/{key}/remotelink` with a body of the shape:
+
+  ```json
+  {
+    "object": {
+      "url": "<pr_url>",
+      "title": "<title or pr_url>",
+      "icon": {"url16x16": "https://github.githubassets.com/favicons/favicon.png"}
+    }
+  }
+  ```
+
+- This is Jira Cloud's portable analogue to Linear's native attachments. The contract surface is
+  identical from the caller's perspective.
+
+Webhooks:
+
+- Out of scope for v1. Symphony polls. Adapters MUST NOT depend on webhook callbacks for state
+  consistency. This is intentional and is not under reconsideration in this spec version.
+
+Rate limits and operational notes:
+
+- Jira Cloud enforces per-instance rate limits documented at
+  `https://developer.atlassian.com/cloud/jira/platform/rate-limiting/`. Symphony does not impose a
+  client-side rate limiter and treats `429` and `503 Retry-After` as transport-level errors subject
+  to normal retry behavior. Implementations MAY honor `Retry-After` when present.
+- The Jira ADF format is rich enough to express formatted bodies. The adapter's `create_comment`
+  contract intentionally stays plain text to preserve symmetry with the Linear adapter; implementors
+  may add a richer extension surface in a future revision.
+
+Worked example (candidate fetch):
+
+```http
+GET /rest/api/3/search/jql?jql=project%20%3D%20ENG%20AND%20statusCategory%20!%3D%20Done&fields=summary,description,priority,status,labels,issuelinks,created,updated&nextPageToken= HTTP/1.1
+Host: acme.atlassian.net
+Authorization: Basic <base64(email:api_token)>
+Accept: application/json
+```
+
+Worked example (state transition):
+
+```http
+GET  /rest/api/3/issue/ENG-123/transitions
+POST /rest/api/3/issue/ENG-123/transitions
+Content-Type: application/json
+
+{"transition": {"id": "31"}}
+```
+
+### 11.5 Error Handling Contract
+
+RECOMMENDED error categories at the adapter boundary:
+
+Common:
 
 - `unsupported_tracker_kind`
-- `missing_tracker_api_key`
-- `missing_tracker_project_slug`
-- `linear_api_request` (transport failures)
+- `missing_tracker_config` (a REQUIRED adapter-specific config field is absent after `$` resolution)
+- `state_transition_not_available`
+- `state_transition_ambiguous`
+
+Linear-specific:
+
+- `linear_api_request` (transport failure)
 - `linear_api_status` (non-200 HTTP)
-- `linear_graphql_errors`
+- `linear_graphql_errors` (top-level GraphQL `errors`)
 - `linear_unknown_payload`
 - `linear_missing_end_cursor` (pagination integrity error)
 
-Orchestrator behavior on tracker errors:
+Jira-specific:
+
+- `jira_api_request` (transport failure)
+- `jira_api_status` (non-2xx HTTP)
+- `jira_invalid_jql` (Jira returned `400` indicating JQL parse/eval failure)
+- `jira_unknown_payload` (response did not match the expected shape)
+- `jira_missing_next_page_token` (pagination integrity error)
+
+Orchestrator behavior on tracker errors (unchanged regardless of adapter):
 
 - Candidate fetch failure: log and skip dispatch for this tick.
 - Running-state refresh failure: log and keep active workers running.
 - Startup terminal cleanup failure: log warning and continue startup.
 
-### 11.5 Tracker Writes (Important Boundary)
+### 11.6 Tracker Writes (Important Boundary)
 
 Symphony does not require first-class tracker write APIs in the orchestrator.
 
@@ -1206,8 +1480,13 @@ Symphony does not require first-class tracker write APIs in the orchestrator.
 - The service remains a scheduler/runner and tracker reader.
 - Workflow-specific success often means "reached the next handoff state" (for example
   `Human Review`) rather than tracker terminal state `Done`.
-- If the `linear_graphql` client-side tool extension is implemented, it is still part of the agent
-  toolchain rather than orchestrator business logic.
+- The OPTIONAL adapter write operations in Section 11.1 (`create_comment`, `update_issue_state`,
+  `link_pr`) exist so an implementation MAY expose them to the coding agent as client-side tools,
+  or use them in future first-class orchestrator features. Wiring them is not REQUIRED for
+  conformance.
+- If the `linear_graphql` client-side tool extension (Section 10.5) is implemented, it is still part
+  of the agent toolchain rather than orchestrator business logic. An equivalent `jira_rest`
+  client-side tool MAY be implemented for the Jira adapter under the same boundary.
 
 ## 12. Prompt Construction and Context Assembly
 
@@ -1663,10 +1942,12 @@ Possible hardening measures include:
   of running with a maximally permissive configuration.
 - Adding external isolation layers such as OS/container/VM sandboxing, network restrictions, or
   separate credentials beyond the built-in Codex policy controls.
-- Filtering which Linear issues, projects, teams, labels, or other tracker sources are eligible for
-  dispatch so untrusted or out-of-scope tasks do not automatically reach the agent.
-- Narrowing the `linear_graphql` tool so it can only read or mutate data inside the
-  intended project scope, rather than exposing general workspace-wide tracker access.
+- Filtering which tracker issues, projects, teams, labels, or other tracker sources are eligible
+  for dispatch (Linear `project_slug` + label filters; Jira `tracker.jira.jql`) so untrusted or
+  out-of-scope tasks do not automatically reach the agent.
+- Narrowing any tracker-passthrough client-side tool (for example `linear_graphql`) so it can only
+  read or mutate data inside the intended project scope, rather than exposing general workspace-wide
+  tracker access.
 - Reducing the set of client-side tools, credentials, filesystem paths, and network destinations
   available to the agent to the minimum needed for the workflow.
 
@@ -1940,9 +2221,13 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Invalid YAML front matter returns typed error
 - Front matter non-map returns typed error
 - Config defaults apply when OPTIONAL values are missing
-- `tracker.kind` validation enforces currently supported kind (`linear`)
-- `tracker.api_key` works (including `$VAR` indirection)
-- `$VAR` resolution works for tracker API key and path values
+- `tracker.kind` validation accepts each supported kind (`linear`, `jira`) and rejects others
+- Adapter-required fields for the selected `tracker.kind` are validated (Linear: `api_key`,
+  `project_slug`; Jira: `base_url`, `email`, `api_token`, `jql`)
+- Tracker credential fields work via `$VAR` indirection
+- Backward-compatible flat `tracker.endpoint` / `tracker.api_key` / `tracker.project_slug` are
+  accepted as synonyms for `tracker.linear.*` when `tracker.kind == "linear"`
+- `$VAR` resolution works for tracker credentials and path values
 - `~` path expansion works
 - `codex.command` is preserved as a shell command string
 - Per-state concurrency override map normalizes state names and ignores invalid values
@@ -1966,15 +2251,40 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 
 ### 17.3 Issue Tracker Client
 
-- Candidate issue fetch uses active states and project slug
-- Linear query uses the specified project filter field (`slugId`)
-- Empty `fetch_issues_by_states([])` returns empty without API call
+Cross-adapter:
+
+- Empty `fetch_issues_by_states([])` returns empty without an API call
 - Pagination preserves order across multiple pages
-- Blockers are normalized from inverse relations of type `blocks`
 - Labels are normalized to lowercase
-- Issue state refresh by ID returns minimal normalized issues
-- Issue state refresh query uses GraphQL ID typing (`[ID!]`) as specified in Section 11.2
-- Error mapping for request errors, non-200, GraphQL errors, malformed payloads
+- Issue state refresh by ID returns minimal normalized issues (`id`, `identifier`, `state`)
+- Adapter selection by `tracker.kind` returns the correct adapter
+- Normalized issue shape from each adapter matches Section 4.1.1 (fields absent on a given tracker
+  are surfaced as `null` or empty lists, never as missing keys)
+
+If the Linear adapter is implemented:
+
+- Candidate issue fetch uses `tracker.active_states` and `tracker.linear.project_slug`
+- Query uses the specified project filter field (`slugId`)
+- Blockers are normalized from inverse relations of type `blocks`
+- Issue state refresh query uses GraphQL ID typing (`[ID!]`) as specified in Section 11.3
+- Error mapping for `linear_api_request`, `linear_api_status`, `linear_graphql_errors`,
+  `linear_unknown_payload`, `linear_missing_end_cursor`
+- `update_issue_state` resolves target state name to a team-scoped `WorkflowState` ID and returns
+  `state_transition_not_available` for unknown state names
+
+If the Jira Cloud adapter is implemented:
+
+- Candidate issue fetch issues the configured `tracker.jira.jql` against `/rest/api/3/search/jql`
+- Pagination follows `nextPageToken` until exhaustion
+- Basic-auth header is constructed from `email` + `api_token` and is never logged
+- Priority mapping (`Highest`..`Lowest` -> `1`..`5`, others -> `null`) is applied
+- `branch_name` is always `null`
+- Blockers are normalized from `fields.issuelinks` of type name `Blocks`, inward direction
+- `update_issue_state` enumerates transitions, matches by `to.name` case-insensitively, and returns
+  `state_transition_not_available` / `state_transition_ambiguous` when zero / multiple match
+- `create_comment` wraps plain-text body in Atlassian Document Format before POSTing
+- Error mapping for `jira_api_request`, `jira_api_status`, `jira_invalid_jql`,
+  `jira_unknown_payload`, `jira_missing_next_page_token`
 
 ### 17.4 Orchestrator Dispatch, Reconciliation, and Retry
 
@@ -2049,8 +2359,9 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 These checks are RECOMMENDED for production readiness and MAY be skipped in CI when credentials,
 network access, or external service permissions are unavailable.
 
-- A real tracker smoke test can be run with valid credentials supplied by `LINEAR_API_KEY` or a
-  documented local bootstrap mechanism (for example `~/.linear_api_key`).
+- A real tracker smoke test can be run with valid credentials for at least one supported adapter
+  (Linear via `LINEAR_API_KEY` or a documented local bootstrap mechanism such as
+  `~/.linear_api_key`; Jira Cloud via `JIRA_BASE_URL` + `JIRA_EMAIL` + `JIRA_API_TOKEN`).
 - Real integration tests SHOULD use isolated test identifiers/workspaces and clean up tracker
   artifacts when practical.
 - A skipped real-integration test SHOULD be reported as skipped, not silently treated as passed.
@@ -2072,7 +2383,8 @@ Use the same validation profiles as Section 17:
 - Typed config layer with defaults and `$` resolution
 - Dynamic `WORKFLOW.md` watch/reload/re-apply for config and prompt
 - Polling orchestrator with single-authority mutable state
-- Issue tracker client with candidate fetch + state refresh + terminal fetch
+- Issue tracker adapter(s) implementing the contract in Section 11.1 for at least one supported
+  `tracker.kind` (Linear or Jira Cloud), with candidate fetch + state refresh + terminal fetch
 - Workspace manager with sanitized per-issue workspaces
 - Workspace lifecycle hooks (`after_create`, `before_run`, `after_run`, `before_remove`)
 - Hook timeout config (`hooks.timeout_ms`, default `60000`)
@@ -2096,8 +2408,10 @@ Use the same validation profiles as Section 17:
 - TODO: Make observability settings configurable in workflow front matter without prescribing UI
   implementation details.
 - TODO: Add first-class tracker write APIs (comments/state transitions) in the orchestrator instead
-  of only via agent tools.
-- TODO: Add pluggable issue tracker adapters beyond Linear.
+  of only via agent tools. The adapter-level `create_comment`, `update_issue_state`, and `link_pr`
+  operations defined in Section 11.1 are the intended surface.
+- TODO: Implement the Jira Cloud adapter against the contract in Section 11.4 in any reference
+  implementation that currently ships only the Linear adapter.
 
 ### 18.3 Operational Validation Before Production (RECOMMENDED)
 
