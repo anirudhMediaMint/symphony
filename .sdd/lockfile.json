@@ -1,0 +1,10 @@
+{
+  "spec_kit": "v0.8.8",
+  "spec_kit_agent_assign": "v1.1.0",
+  "spec_kit_worktree_parallel": "v1.3.2",
+  "spec_kit_superpowers_bridge": "v1.3.0",
+  "agency_agents": "783f6a72bfd7f3135700ac273c619d92821b419a",
+  "obra_superpowers": "HEAD",
+  "skill_version": "0.4.1",
+  "installed_at": "2026-05-12T02:51:14Z"
+}

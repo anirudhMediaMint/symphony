@@ -1,0 +1,70 @@
+# Default sdd-team roster.
+# Per-project mapping of SDD roles to agency-agents. Edit to taste.
+# See references/roster-schema.md for the schema and references/agency-agents-mapping.md
+# for substitutes if any of these agents go missing in a future agency-agents release.
+
+project: <fill-in-project-name>
+
+# Always present across all phases.
+core:
+  - role: pm
+    agent: agency/product/product-manager
+    description: "Spec clarity, user-story shape, scope discipline"
+
+  - role: architect
+    agent: agency/engineering/software-architect
+    description: "System design, DDD, boundaries, trade-off analysis"
+
+# Joins only the phases listed.
+reinforcements:
+  # Brownfield only: read-only codebase exploration during Phase 0.5
+  - role: recon
+    agent: agency/engineering/codebase-onboarding-engineer
+    phases: [recon]
+    brownfield_only: true
+    description: "Fast read-only codebase exploration; produces recon.md"
+
+  - role: tech-lead
+    agent: agency/engineering/backend-architect
+    phases: [plan]
+    description: "Tech feasibility, scaling implications, API surface"
+
+  - role: security
+    agent: agency/engineering/security-engineer
+    phases: [specify, plan]
+    optional_when: "no auth/PII/compliance surface touched"
+    description: "Threat modeling, data-flow review, secure code review"
+
+  - role: frontend-coder
+    agent: agency/engineering/frontend-developer
+    phases: [implement]
+    file_patterns:
+      - "**/*.tsx"
+      - "**/*.jsx"
+      - "**/components/**"
+      - "**/pages/**"
+    keywords: [ui, component, page, form, view, route]
+    isolate: false   # set true to spawn this teammate in its own sub-worktree
+
+  - role: backend-coder
+    agent: agency/engineering/senior-developer
+    phases: [implement]
+    file_patterns:
+      - "**/*.py"
+      - "**/api/**"
+      - "src/server/**"
+      - "**/services/**"
+    keywords: [api, endpoint, model, migration, controller, service]
+    isolate: false
+
+  - role: tester
+    agent: agency/testing/reality-checker
+    phases: [implement]
+    keywords: [test, spec, coverage, e2e]
+    description: "Evidence-based production readiness; not vibe checks"
+
+  - role: reviewer
+    agent: agency/engineering/code-reviewer
+    phases: [implement]
+    runs_after: all
+    description: "Final pass before PR — security, maintainability, conventions"
