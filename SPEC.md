@@ -366,7 +366,8 @@ Section 11. The keys recognized for each adapter are:
   - `endpoint`, `api_key`, `project_slug`
 - `tracker.jira` (see Section 11.4):
   - `base_url`, `email`, `api_token`, `jql`, `priority_map` (OPTIONAL; see Section 11.4 for
-    semantics)
+    semantics), `max_issues_per_poll` (OPTIONAL; default `200`, MUST be ≥ 1),
+    `allow_aggressive_polling` (OPTIONAL; default `false`)
 
 For backward compatibility with `tracker.kind == "linear"` configurations written before this
 specification version, flat keys (`tracker.endpoint`, `tracker.api_key`, `tracker.project_slug`) MAY
@@ -583,6 +584,21 @@ Validation checks:
   - `linear`: `api_key`, `project_slug`
   - `jira`: `base_url`, `email`, `api_token`, `jql`; `priority_map` is OPTIONAL (see Section 11.4)
 - `codex.command` is present and non-empty.
+- Workflow-state resolvability. Preflight MUST invoke the configured tracker adapter's optional
+  `validate_state_resolvability()` operation when the adapter implements it. If the operation
+  returns one or more unresolvable workflow-named states, preflight fails with
+  `workflow_state_unresolvable` (a new entry in Section 11.5 Common errors), naming each
+  unresolved state.
+- Jira poll-interval floor. When `tracker.kind == jira` and `agent.poll_interval_ms < 30000` and
+  `tracker.jira.allow_aggressive_polling` is `false`, preflight MUST fail with
+  `jira_poll_interval_too_aggressive` (see Section 11.5). The error message MUST name the
+  configured interval, the minimum (`30000` ms), and the override key
+  (`tracker.jira.allow_aggressive_polling`).
+- JQL `ORDER BY` rejection. When `tracker.kind == jira`, preflight MUST parse
+  `tracker.jira.jql` (case-insensitive token scan) for the literal `ORDER BY` keyword pair. If
+  present, preflight MUST fail with `jql_order_by_not_allowed` (see Section 11.5). The error
+  message MUST quote the offending JQL fragment and reference Section 8.2's canonical dispatch
+  ordering.
 
 ### 6.4 Core Config Fields Summary (Cheat Sheet)
 
@@ -601,6 +617,8 @@ not require recognizing or validating extension fields unless that extension is 
 - `tracker.jira.api_token`: string or `$VAR`, canonical env `JIRA_API_TOKEN`, REQUIRED when `tracker.kind=jira`
 - `tracker.jira.jql`: string, REQUIRED when `tracker.kind=jira`; raw JQL string used for candidate selection
 - `tracker.jira.priority_map`: map of string -> positive integer, OPTIONAL when `tracker.kind=jira`; resolves custom priority scheme names per Section 11.4
+- `tracker.jira.max_issues_per_poll`: integer, default `200`, MUST be ≥ 1; cap on cumulative normalized-issue count fetched per poll cycle (see Section 11.4)
+- `tracker.jira.allow_aggressive_polling`: boolean, default `false`; when `false`, preflight rejects `agent.poll_interval_ms < 30000` for Jira (see Sections 6.3 and 11.4)
 - `polling.interval_ms`: integer, default `30000`
 - `workspace.root`: path resolved to absolute, default `<system-temp>/symphony_workspaces`
 - `hooks.after_create`: shell script or null
@@ -1226,6 +1244,19 @@ Rationale for "name a target state, let the adapter resolve the path":
   vocabulary. Reversible: a future revision MAY add `update_issue_via_transition(issue_id,
   transition_name)` as a second, adapter-specific entry point without breaking existing callers.
 
+OPTIONAL read operations (NOT used by the orchestration loop directly; invoked by preflight
+validation — see Section 6.3):
+
+6. `validate_state_resolvability() -> {ok, []} | {ok, [UnresolvedStateName]} | {error, ErrorClass}`
+   - Read-only adapter introspection. Returns the list of workflow-named states referenced by
+     Symphony's configuration (e.g., the transition mapping in `WORKFLOW.md`) that the adapter
+     cannot resolve to a reachable server-side state.
+   - An empty list means every referenced state name is resolvable.
+   - Adapters that cannot introspect server-side workflow state SHOULD omit this operation (or
+     return `{error, not_implemented}`); preflight skips the check in that case.
+   - This operation is read-only and does not violate Principle VI; it issues no tracker
+     mutations.
+
 PR-link surface:
 
 - Associating a pull-request URL with a tracker issue is OPTIONAL. When implemented, adapters
@@ -1344,6 +1375,7 @@ Rate limits and operational notes:
   fields/types REQUIRED by this specification.
 - Linear rate-limit behavior is documented by Linear; Symphony does not impose a client-side rate
   limiter and treats `429` as a transport-level error subject to normal retry behavior.
+- Linear has no minimum poll interval imposed by this spec.
 
 ### 11.4 Jira Cloud Adapter (`tracker.kind == "jira"`)
 
@@ -1383,6 +1415,18 @@ Issue selection input:
   response (the older `isLast` field is ignored for the `/search/jql` endpoint). Implementations
   SHOULD set a reasonable `maxResults` (e.g., 100) per request; adapters MUST NOT assume Jira
   honors arbitrarily large values.
+- Result-set cap. The adapter paginates `/rest/api/3/search/jql` until either (a) the response
+  signals exhaustion (no `nextPageToken`), or (b) the cumulative normalized-issue count reaches
+  `tracker.jira.max_issues_per_poll` (default `200`). If the cap is hit while results remain
+  unfetched, the adapter MUST log a WARN-level message naming the cap, the observed count
+  threshold, and the JQL query (truncated to 200 chars). The adapter proceeds with the first N
+  issues; the orchestrator dispatches normally against them. Operators with intentionally large
+  polling sets MUST raise `max_issues_per_poll` explicitly; the adapter MUST NOT silently expand
+  the cap.
+- JQL contract. Operator JQL MUST NOT contain an `ORDER BY` clause. Symphony's dispatch ordering
+  is canonical (Section 8.2: priority descending, then oldest creation timestamp); an
+  operator-supplied `ORDER BY` would create ambiguity between adapter-fetch order and dispatch
+  order. Preflight (Section 6.3) rejects such JQL with `jql_order_by_not_allowed`.
 - The orchestrator still applies `tracker.active_states` filtering against normalized `state` after
   the adapter returns. The JQL is the broad candidate filter; `active_states` is the precise
   dispatch gate. Operators SHOULD ensure their JQL is at least as wide as `active_states` to avoid
@@ -1409,6 +1453,25 @@ Normalized field mapping (Jira field -> normalized field):
   - Insert two `\n` between **top-level block nodes**.
   - Ignore unknown marks; render the text content of unknown nodes (i.e., recurse into their
     children and emit leaf text).
+  - **Non-text ADF nodes** are rendered as follows:
+    - `media`, `mediaSingle`, `mediaGroup` (images/files): render as
+      `[image: <attrs.alt or attrs.title or 'file'>]`. If the node has no alt/title, use the file
+      collection ID truncated.
+    - `mention`: render as `@<displayName>` using the mention's text content as the display name.
+      If text content is absent, render `@<accountId>` truncated to 8 chars.
+    - `inlineCard`, `blockCard`: render the URL in `attrs.url` enclosed in angle brackets:
+      `<https://...>`.
+    - `panel`: render the inner text content with a leading `[panel:<panelType>]` marker on its
+      own line; preserve the inner block-node spacing rules.
+    - `emoji`: render as the literal shortName, e.g. `:thumbsup:`.
+    - `status`: render as `[<text>]` using the status node's text.
+    - `date`: render as the ISO-8601 string from `attrs.timestamp` (epoch ms → ISO).
+    - Unknown nodes: render the concatenated text content of their children (no marker).
+  - Adapters that perform lossy rendering (any of the above placeholder substitutions executed on
+    a given issue) MUST emit a single DEBUG-level log line per issue summarizing which
+    placeholder categories fired (e.g., `adf_lossy_render: media=2 mention=1`). This is for
+    operator diagnostics — it is NOT a WARN because lossy rendering is expected behavior, not a
+    failure.
 - `fields.priority.name` -> `priority` mapping. Jira's priority is a name, not a number. The adapter
   MUST map `Highest -> 1`, `High -> 2`, `Medium -> 3`, `Low -> 4`, `Lowest -> 5`, and unknown names
   to `null`, so the normalized `priority` integer ordering in Section 8.2 still works.
@@ -1449,6 +1512,25 @@ State transitions (`update_issue_state`):
 - If zero matches: return `{error, state_transition_not_available}`.
 - If more than one match: return `{error, state_transition_ambiguous}`. Operators MUST NOT rely on
   the adapter guessing when a Jira project has duplicate transition target names.
+
+State resolvability preflight (`validate_state_resolvability`):
+
+- The Jira adapter implements `validate_state_resolvability()` by fetching
+  `/rest/api/3/issue/createmeta?expand=projects.issuetypes.workflowscheme` (or equivalent
+  introspection) for each project the configured JQL can resolve, then checking that every state
+  name referenced in `WORKFLOW.md`'s transition mapping is reachable from at least one initial
+  status. Unreachable names are returned as a list.
+- This operation is read-only and is invoked by preflight (Section 6.3); it does not violate
+  Principle VI.
+
+Polling cadence:
+
+- Jira Cloud enforces account-level rate limits that vary by license tier; a poll interval below
+  30 seconds risks `429`s under load. The adapter requires `agent.poll_interval_ms ≥ 30000`
+  unless `tracker.jira.allow_aggressive_polling: true` is set. Operators electing aggressive
+  polling MUST own the rate-limit consequences; the orchestrator's existing backoff applies to
+  `429` responses but does not protect the rate budget. Preflight (Section 6.3) rejects
+  sub-30s intervals without the override with `jira_poll_interval_too_aggressive`.
 
 Comments (`create_comment`):
 
@@ -1563,6 +1645,22 @@ Common:
   permission, or narrow the configured selection input.)
 - `state_transition_not_available`
 - `state_transition_ambiguous`
+- `workflow_state_unresolvable` (raised by preflight, Section 6.3, when the adapter's
+  `validate_state_resolvability()` operation returns one or more workflow-named states that the
+  tracker cannot resolve to a reachable server-side state. The error message MUST name each
+  unresolved state. Operator action: configure the tracker so each referenced state is reachable
+  from at least one initial status, or correct the state name in `WORKFLOW.md`.)
+- `jira_poll_interval_too_aggressive` (raised by preflight, Section 6.3, when
+  `tracker.kind == jira`, `agent.poll_interval_ms < 30000`, and
+  `tracker.jira.allow_aggressive_polling` is `false`. The error message MUST name the configured
+  interval, the minimum (`30000` ms), and the override key. Operator action: raise
+  `agent.poll_interval_ms` to at least `30000` ms, or set
+  `tracker.jira.allow_aggressive_polling: true` and accept the rate-limit consequences.)
+- `jql_order_by_not_allowed` (raised by preflight, Section 6.3, when `tracker.kind == jira` and
+  `tracker.jira.jql` contains an `ORDER BY` clause (case-insensitive token scan). The error
+  message MUST quote the offending JQL fragment and reference Section 8.2's canonical dispatch
+  ordering. Operator action: remove the `ORDER BY` clause from `tracker.jira.jql`; Symphony's
+  dispatch order is fixed.)
 
 Both adapters MUST map authentication and authorization failures to `tracker_unauthorized` and
 `tracker_forbidden` respectively. These categories MUST NOT be conflated with
