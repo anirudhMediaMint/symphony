@@ -370,8 +370,15 @@ Section 11. The keys recognized for each adapter are:
 For backward compatibility with `tracker.kind == "linear"` configurations written before this
 specification version, flat keys (`tracker.endpoint`, `tracker.api_key`, `tracker.project_slug`) MAY
 be accepted as synonyms for the corresponding `tracker.linear.*` fields when `tracker.kind ==
-"linear"`. Implementations SHOULD prefer the nested form and MAY emit a deprecation warning when the
-flat form is used.
+"linear"`. Flat keys are deprecated; new configurations SHOULD use the nested form.
+
+Precedence rules when both flat and nested keys are present for the same logical field (e.g., both
+`tracker.api_key` and `tracker.linear.api_key`):
+
+- If the values are **identical**: the nested key wins. Implementations SHOULD log a warning that
+  the flat key is redundant.
+- If the values **differ**: preflight validation (Section 6.3) MUST fail with a
+  `tracker_config_conflict` error. The error message MUST name both conflicting keys.
 
 #### 5.3.2 `polling` (object)
 
@@ -1182,13 +1189,15 @@ REQUIRED read operations:
    - Returned issues SHOULD include at least `id`, `identifier`, and `state`.
    - Missing IDs are silently omitted from the result rather than producing an error.
 
-OPTIONAL write operations (NOT used by the orchestration loop; available as a tool surface for the
-coding agent or future first-class write features — see Section 11.6):
+OPTIONAL write operations (NOT used by the orchestration loop; defined solely so adapters MAY
+expose them to the coding agent as client-side tools — see Section 11.6 for the orchestrator
+boundary):
 
 4. `create_comment(issue_id, body) -> ok | {error, ErrorClass}`
-   - Post a plain-text comment on the issue.
-   - The adapter is responsible for wrapping `body` into any tracker-required document format (for
-     example, Atlassian Document Format for Jira) without changing the caller's contract.
+   - Post a comment on the issue. `body` is **plain text**. Adapters MUST NOT interpret Markdown or
+     HTML in `body`.
+   - Per-adapter rendering (for example, wrapping `body` into Atlassian Document Format for Jira) is
+     an adapter implementation detail transparent to the caller.
 
 5. `update_issue_state(issue_id, state_name) -> ok | {error, ErrorClass}`
    - Move the issue to the named state.
@@ -1211,7 +1220,11 @@ PR-link surface:
 
 - Associating a pull-request URL with a tracker issue is OPTIONAL. When implemented, adapters
   expose it as a `link_pr(issue_id, pr_url, title?) -> ok | {error, ErrorClass}` operation that the
-  agent toolchain may invoke. Implementation differs per tracker:
+  agent toolchain may invoke.
+- `title` is OPTIONAL. When `title` is omitted, adapters MUST default to a reasonable display string
+  derived from `pr_url` (for example, the path segment after the host). Implementations MAY choose
+  richer defaults, but the contract guarantees a non-empty display string for every link.
+- Implementation differs per tracker:
   - Linear: native attachment via the GraphQL `attachmentLinkURL` mutation.
   - Jira Cloud: remote issue link via `POST /rest/api/3/issue/{issueIdOrKey}/remotelink`.
   Neither operation is invoked by the orchestrator and neither is REQUIRED for conformance.
@@ -1284,7 +1297,9 @@ State transitions (`update_issue_state`):
 
 Comments (`create_comment`):
 
-- Call `commentCreate(input: {issueId: $issueId, body: $body})`. Linear accepts Markdown directly.
+- Call `commentCreate(input: {issueId: $issueId, body: $body})`. The caller's `body` is plain text
+  per Section 11.1; the adapter passes it through without interpreting Markdown or HTML. Linear
+  renders the resulting comment as plain text.
 
 PR links (`link_pr`, OPTIONAL):
 
@@ -1340,8 +1355,15 @@ Normalized field mapping (Jira field -> normalized field):
 - `key` -> `identifier` (e.g. `ENG-123`)
 - `id` -> `id`
 - `fields.summary` -> `title`
-- `fields.description` -> `description` (Jira returns ADF; the adapter MAY extract plain text or
-  pass the ADF document through as a string — implementations SHOULD document the chosen behavior)
+- `fields.description` -> `description`. Jira returns ADF (Atlassian Document Format). The adapter
+  MUST render the ADF document to plain text using the deterministic algorithm below. Raw ADF
+  passthrough is an EXTENSION (see "Description format extension" below).
+  - Concatenate the text content of all leaf nodes in document order.
+  - Insert one `\n` between sibling **block nodes** (paragraph, heading, list item, code block,
+    blockquote).
+  - Insert two `\n` between **top-level block nodes**.
+  - Ignore unknown marks; render the text content of unknown nodes (i.e., recurse into their
+    children and emit leaf text).
 - `fields.priority.name` -> `priority` mapping. Jira's priority is a name, not a number. The adapter
   MUST map `Highest -> 1`, `High -> 2`, `Medium -> 3`, `Low -> 4`, `Lowest -> 5`, and unknown names
   to `null`, so the normalized `priority` integer ordering in Section 8.2 still works.
@@ -1404,6 +1426,31 @@ PR links (`link_pr`, OPTIONAL):
 - This is Jira Cloud's portable analogue to Linear's native attachments. The contract surface is
   identical from the caller's perspective.
 
+Description format extension (OPTIONAL):
+
+- Adapters MAY offer raw ADF passthrough as an EXTENSION to the REQUIRED plain-text rendering above.
+- If offered, it MUST be exposed under an adapter-specific extension key in `WORKFLOW.md`, namely
+  `tracker.jira.description_format: "adf" | "text"`, with default `"text"`.
+- Implementations MUST document that workflow templates relying on raw ADF (`"adf"`) are NOT
+  portable across tracker kinds; the portable normalized contract is plain text.
+
+Token requirements:
+
+- The adapter authenticates with a classic Atlassian API token issued at
+  `https://id.atlassian.com/manage-profile/security/api-tokens`, paired with the account email via
+  HTTP Basic (see "Transport" above).
+- The account MUST have **Browse Projects** permission on every project the configured JQL can
+  resolve. Failure to do so will surface as `403 Forbidden` from Jira when the JQL touches a project
+  the account cannot read.
+- Authentication and authorization failures map as follows:
+  - `401 Unauthorized` MUST be mapped to error category `tracker_unauthorized` (see Section 11.5).
+    This is typically credential rot or a revoked token. Operator action: rotate the token.
+  - `403 Forbidden` MUST be mapped to error category `tracker_forbidden` (see Section 11.5). This is
+    typically a permission gap on a project the JQL touches. Operator action: grant Browse Projects
+    on the affected project, or narrow `tracker.jira.jql` to projects the account can read.
+  - Neither `401` nor `403` MUST be mapped to `missing_tracker_config`; that category is reserved
+    for absent or malformed `WORKFLOW.md` configuration.
+
 Webhooks:
 
 - Out of scope for v1. Symphony polls. Adapters MUST NOT depend on webhook callbacks for state
@@ -1446,8 +1493,19 @@ Common:
 
 - `unsupported_tracker_kind`
 - `missing_tracker_config` (a REQUIRED adapter-specific config field is absent after `$` resolution)
+- `tracker_config_conflict` (Section 5.3.1: flat and nested keys disagree on the same logical field)
+- `tracker_unauthorized` (authentication failure at the tracker — typically credential rot or a
+  revoked token; HTTP `401`-equivalent. Operator action: rotate credentials.)
+- `tracker_forbidden` (authorization failure at the tracker — typically a permission gap on a
+  resource the request touched; HTTP `403`-equivalent. Operator action: grant the necessary
+  permission, or narrow the configured selection input.)
 - `state_transition_not_available`
 - `state_transition_ambiguous`
+
+Both adapters MUST map authentication and authorization failures to `tracker_unauthorized` and
+`tracker_forbidden` respectively. These categories MUST NOT be conflated with
+`missing_tracker_config` (which is reserved for absent or malformed `WORKFLOW.md` configuration) or
+with the adapter-specific `*_api_status` categories (which cover non-auth non-2xx statuses).
 
 Linear-specific:
 
@@ -1473,17 +1531,20 @@ Orchestrator behavior on tracker errors (unchanged regardless of adapter):
 
 ### 11.6 Tracker Writes (Important Boundary)
 
-Symphony does not require first-class tracker write APIs in the orchestrator.
+In a conforming Symphony implementation, the orchestrator MUST NOT invoke `create_comment`,
+`update_issue_state`, or `link_pr` on any tracker adapter. These operations exist on the adapter
+contract only so that adapters MAY expose them to the coding agent via client-side tools (for
+example, `linear_graphql`, or an equivalent `jira_rest` tool). Any orchestrator-side mutation of
+tracker state is a Principle VI violation.
 
-- Ticket mutations (state transitions, comments, PR metadata) are typically handled by the coding
-  agent using tools defined by the workflow prompt.
+- Ticket mutations (state transitions, comments, PR metadata) are handled by the coding agent using
+  tools defined by the workflow prompt.
 - The service remains a scheduler/runner and tracker reader.
 - Workflow-specific success often means "reached the next handoff state" (for example
   `Human Review`) rather than tracker terminal state `Done`.
 - The OPTIONAL adapter write operations in Section 11.1 (`create_comment`, `update_issue_state`,
-  `link_pr`) exist so an implementation MAY expose them to the coding agent as client-side tools,
-  or use them in future first-class orchestrator features. Wiring them is not REQUIRED for
-  conformance.
+  `link_pr`) exist so an implementation MAY expose them to the coding agent as client-side tools.
+  Wiring them is not REQUIRED for conformance.
 - If the `linear_graphql` client-side tool extension (Section 10.5) is implemented, it is still part
   of the agent toolchain rather than orchestrator business logic. An equivalent `jira_rest`
   client-side tool MAY be implemented for the Jira adapter under the same boundary.
@@ -2407,9 +2468,9 @@ Use the same validation profiles as Section 17:
 - TODO: Persist retry queue and session metadata across process restarts.
 - TODO: Make observability settings configurable in workflow front matter without prescribing UI
   implementation details.
-- TODO: Add first-class tracker write APIs (comments/state transitions) in the orchestrator instead
-  of only via agent tools. The adapter-level `create_comment`, `update_issue_state`, and `link_pr`
-  operations defined in Section 11.1 are the intended surface.
+- TODO: Implement a `jira_rest` client-side tool extension (parallel to `linear_graphql` in Section
+  10.5) so Jira adapter write operations can be exposed to the coding agent. Per Section 11.6, the
+  orchestrator itself MUST NOT invoke tracker writes.
 - TODO: Implement the Jira Cloud adapter against the contract in Section 11.4 in any reference
   implementation that currently ships only the Linear adapter.
 
