@@ -1725,6 +1725,208 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  describe "flat/nested key compatibility (T069, FR-028, FR-029, FR-030)" do
+    setup do
+      previous_linear_api_key = System.get_env("LINEAR_API_KEY")
+      System.put_env("LINEAR_API_KEY", "fake-linear-key-not-real")
+
+      on_exit(fn ->
+        restore_env("LINEAR_API_KEY", previous_linear_api_key)
+      end)
+
+      :ok
+    end
+
+    test "(a) kind=linear: flat tracker.api_key + nested tracker.linear.api_key identical -> nested wins; single WARN per redundant flat key" do
+      yaml = """
+      ---
+      tracker:
+        kind: "linear"
+        api_key: "shared-key"
+        project_slug: "shared-slug"
+        linear:
+          api_key: "shared-key"
+          project_slug: "shared-slug"
+      polling:
+        interval_ms: 30000
+      workspace:
+        root: "#{Path.join(System.tmp_dir!(), "symphony-flat-nested-#{System.unique_integer([:positive])}")}"
+      hooks:
+        timeout_ms: 60000
+      ---
+      You are an agent for this repository.
+      """
+
+      File.write!(Workflow.workflow_file_path(), yaml)
+      if Process.whereis(SymphonyElixir.WorkflowStore), do: WorkflowStore.force_reload()
+
+      log =
+        capture_log(fn ->
+          assert :ok = Config.validate!()
+        end)
+
+      # Single WARN per redundant flat key (FR-029)
+      assert log =~ "tracker.api_key"
+      assert log =~ "tracker.project_slug"
+    end
+
+    test "(b) kind=linear: divergent values -> {:error, {:tracker_config_conflict, ...}}" do
+      yaml = """
+      ---
+      tracker:
+        kind: "linear"
+        api_key: "flat-key"
+        linear:
+          api_key: "nested-key"
+      polling:
+        interval_ms: 30000
+      workspace:
+        root: "#{Path.join(System.tmp_dir!(), "symphony-conflict-#{System.unique_integer([:positive])}")}"
+      hooks:
+        timeout_ms: 60000
+      ---
+      You are an agent for this repository.
+      """
+
+      File.write!(Workflow.workflow_file_path(), yaml)
+      if Process.whereis(SymphonyElixir.WorkflowStore), do: WorkflowStore.force_reload()
+
+      assert {:error,
+              {:tracker_config_conflict, :"tracker.api_key", :"tracker.linear.api_key"}} =
+               Config.validate!()
+    end
+
+    test "(c) kind=jira: flat keys present are silently ignored (no WARN, no conflict)" do
+      env_var = "JIRA_API_TOKEN_T069C_#{System.unique_integer([:positive])}"
+      previous = System.get_env(env_var)
+      System.put_env(env_var, "fake-jira-token-not-real")
+
+      previous_client = Application.get_env(:symphony_elixir, :jira_client_module)
+
+      Application.put_env(
+        :symphony_elixir,
+        :jira_client_module,
+        SymphonyElixir.WorkspaceAndConfigTest.FakeJiraClientResolvable
+      )
+
+      on_exit(fn ->
+        restore_env(env_var, previous)
+
+        case previous_client do
+          nil -> Application.delete_env(:symphony_elixir, :jira_client_module)
+          mod -> Application.put_env(:symphony_elixir, :jira_client_module, mod)
+        end
+      end)
+
+      yaml = """
+      ---
+      tracker:
+        kind: "jira"
+        api_key: "leftover-flat-key"
+        project_slug: "leftover-flat-slug"
+        active_states: ["Todo", "In Progress"]
+        terminal_states: ["Closed", "Done"]
+        jira:
+          base_url: "https://jira.test"
+          email: "dev@example.com"
+          api_token: "$#{env_var}"
+          jql: "project = ENG"
+      polling:
+        interval_ms: 30000
+      workspace:
+        root: "#{Path.join(System.tmp_dir!(), "symphony-jira-flat-#{System.unique_integer([:positive])}")}"
+      hooks:
+        timeout_ms: 60000
+      ---
+      You are an agent for this repository.
+      """
+
+      File.write!(Workflow.workflow_file_path(), yaml)
+      if Process.whereis(SymphonyElixir.WorkflowStore), do: WorkflowStore.force_reload()
+
+      log =
+        capture_log(fn ->
+          assert :ok = Config.validate!()
+        end)
+
+      # FR-028: flat keys MUST be silently ignored when kind == "jira"
+      refute log =~ "tracker.api_key"
+      refute log =~ "tracker.project_slug"
+      refute log =~ "tracker_config_conflict"
+    end
+  end
+
+  describe "base_url shape validation (T071, FR-032, NFR-SEC-002)" do
+    setup do
+      env_var = "JIRA_API_TOKEN_T071_#{System.unique_integer([:positive])}"
+      previous = System.get_env(env_var)
+      System.put_env(env_var, "fake-jira-token-not-real")
+
+      previous_client = Application.get_env(:symphony_elixir, :jira_client_module)
+
+      Application.put_env(
+        :symphony_elixir,
+        :jira_client_module,
+        SymphonyElixir.WorkspaceAndConfigTest.FakeJiraClientResolvable
+      )
+
+      on_exit(fn ->
+        restore_env(env_var, previous)
+
+        case previous_client do
+          nil -> Application.delete_env(:symphony_elixir, :jira_client_module)
+          mod -> Application.put_env(:symphony_elixir, :jira_client_module, mod)
+        end
+      end)
+
+      {:ok, env_var: env_var}
+    end
+
+    test "(a) http (non-HTTPS) base_url fails preflight", %{env_var: env_var} do
+      write_jira_workflow_file!(Workflow.workflow_file_path(),
+        base_url: "http://acme.atlassian.net",
+        email: "dev@example.com",
+        api_token: "$#{env_var}",
+        jql: "project = ENG"
+      )
+
+      assert {:error, {:missing_tracker_config, :"tracker.jira.base_url"}} = Config.validate!()
+    end
+
+    test "(b) https:// with empty host fails preflight", %{env_var: env_var} do
+      write_jira_workflow_file!(Workflow.workflow_file_path(),
+        base_url: "https://",
+        email: "dev@example.com",
+        api_token: "$#{env_var}",
+        jql: "project = ENG"
+      )
+
+      assert {:error, {:missing_tracker_config, :"tracker.jira.base_url"}} = Config.validate!()
+    end
+
+    test "(c) https://host/ with trailing slash passes", %{env_var: env_var} do
+      write_jira_workflow_file!(Workflow.workflow_file_path(),
+        base_url: "https://acme.atlassian.net/",
+        email: "dev@example.com",
+        api_token: "$#{env_var}",
+        jql: "project = ENG"
+      )
+
+      assert :ok = Config.validate!()
+    end
+
+    test "(d) https://host passes", %{env_var: env_var} do
+      write_jira_workflow_file!(Workflow.workflow_file_path(),
+        base_url: "https://acme.atlassian.net",
+        email: "dev@example.com",
+        api_token: "$#{env_var}",
+        jql: "project = ENG"
+      )
+
+      assert :ok = Config.validate!()
+    end
+  end
+
   defp write_jira_workflow_file!(path, opts) do
     base_url = Keyword.fetch!(opts, :base_url)
     email = Keyword.fetch!(opts, :email)
