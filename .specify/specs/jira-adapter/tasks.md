@@ -256,27 +256,27 @@ These FRs do not map cleanly to one user story but are required by spec acceptan
 
 ### Issue links + transitions
 
-- [ ] T062 [P] [FR-017] RED test: in `elixir/test/symphony_elixir/jira/client_test.exs`, add `extract_blocked_by_for_test/1` test — only `type.name == "Blocks"` with `type.inward == "is blocked by"` AND `inwardIssue` populated yields blocker refs of shape `%{id: ..., key: ..., status: ...}`.
-- [ ] T063 [FR-017] GREEN: implement `extract_blocked_by_for_test/1` and wire into normalization. T062 passes.
+- [x] T062 [P] [FR-017] RED test: in `elixir/test/symphony_elixir/jira/client_test.exs`, add `extract_blocked_by_for_test/1` test — only `type.name == "Blocks"` with `type.inward == "is blocked by"` AND `inwardIssue` populated yields blocker refs of shape `%{id: ..., key: ..., status: ...}`.
+- [x] T063 [FR-017] GREEN: implement `extract_blocked_by_for_test/1` and wire into normalization. T062 passes.
 
-- [ ] T064 [P] [FR-024, FR-025] RED test: in `elixir/test/symphony_elixir/jira/client_test.exs`, add tests for `Jira.Client.create_comment/2` (ADF-wrapping `body`) and `find_transition/2` + `execute_transition/2`: zero match → `:state_transition_not_available`, multi-match → `:state_transition_ambiguous`, one match → `:ok`.
-- [ ] T065 [FR-024, FR-025] GREEN: implement `create_comment/2`, `find_transition/2`, `execute_transition/2` in `elixir/lib/symphony_elixir/jira/client.ex`. Wire `Jira.Adapter.create_comment/2` and `update_issue_state/2` to call them. T064 passes.
+- [x] T064 [P] [FR-024, FR-025] RED test: in `elixir/test/symphony_elixir/jira/client_test.exs`, add tests for `Jira.Client.create_comment/2` (ADF-wrapping `body`) and `find_transition/2` + `execute_transition/2`: zero match → `:state_transition_not_available`, multi-match → `:state_transition_ambiguous`, one match → `:ok`.
+- [x] T065 [FR-024, FR-025] GREEN: implement `create_comment/2`, `find_transition/2`, `execute_transition/2` in `elixir/lib/symphony_elixir/jira/client.ex`. Wire `Jira.Adapter.create_comment/2` and `update_issue_state/2` to call them. T064 passes.
 
 ### Redirect + remaining error mapping
 
-- [ ] T066 [P] [FR-009, NFR-SEC-003, AC-012] RED test: in `elixir/test/symphony_elixir/jira/client_test.exs`, add 3xx-redirect-rejection test — `request_fun:` returns 302; assert `{:error, {:jira_unexpected_redirect, 302}}` and assert (via captured request log to the redirect URL) that `Authorization` header is NOT re-sent. Cover both same-host and cross-host redirects.
-- [ ] T067 [P] [FR-040] RED test: same file, exhaustive error-mapping coverage — `{:jira_api_status, code}` for 404/422/429/500/502/503, `{:jira_api_request, reason}` for transport `{:error, _}`, `:jira_unknown_payload` for 200 with malformed body or missing `issues` key, `:jira_missing_next_page_token` when pagination claims more pages but token absent. (AC-003 cross-checks.)
-- [ ] T068 [FR-009, FR-040] GREEN: wire `redirect: false` on `Req` call + full error-atom dispatch in `elixir/lib/symphony_elixir/jira/client.ex`. T066 + T067 pass.
+- [x] T066 [P] [FR-009, NFR-SEC-003, AC-012] RED test: in `elixir/test/symphony_elixir/jira/client_test.exs`, add 3xx-redirect-rejection test — `request_fun:` returns 302; assert `{:error, {:jira_unexpected_redirect, 302}}` and assert (via captured request log to the redirect URL) that `Authorization` header is NOT re-sent. Cover both same-host and cross-host redirects.
+- [x] T067 [P] [FR-040] RED test: same file, exhaustive error-mapping coverage — `{:jira_api_status, code}` for 404/422/429/500/502/503, `{:jira_api_request, reason}` for transport `{:error, _}`, `:jira_unknown_payload` for 200 with malformed body or missing `issues` key, `:jira_missing_next_page_token` when pagination claims more pages but token absent. (AC-003 cross-checks.)
+- [x] T068 [FR-009, FR-040] GREEN: `redirect: false` on `Req` call + full error-atom dispatch in `elixir/lib/symphony_elixir/jira/client.ex` already landed via US1/US3/US7 (T026, T032, T048, T049) — `classify_error_response/3` handles 300..399 / 401 / 403 / 400-on-search / catch-all `:jira_api_status`; transport errors map to `:jira_api_request`; 200 with malformed body maps to `:jira_unknown_payload`. T066 + T067 pass on the existing code path.
 
 ### Flat/nested key compatibility
 
-- [ ] T069 [P] [FR-028, FR-029, FR-030] RED test: in `elixir/test/symphony_elixir/workspace_and_config_test.exs`, add three tests: (a) flat `tracker.api_key` + nested `tracker.linear.api_key` with identical values + `kind == "linear"` → nested wins, single WARN logged per redundant flat key (FR-029); (b) divergent values → `{:error, {:tracker_config_conflict, :"tracker.api_key", :"tracker.linear.api_key"}}` (FR-030); (c) flat keys present + `kind == "jira"` → silently ignored (no WARN, no conflict — FR-028).
-- [ ] T070 [FR-028, FR-029, FR-030, FR-034, FR-039] GREEN: extend `Config.Schema.finalize_settings/1` (flat→nested merge for Linear only) + `Config.validate!/0` (conflict detection) in `elixir/lib/symphony_elixir/config/schema.ex` and `elixir/lib/symphony_elixir/config.ex`. Guard existing `missing_linear_*` checks by `kind == "linear"` (FR-039). T069 passes.
+- [x] T069 [P] [FR-028, FR-029, FR-030] RED test: in `elixir/test/symphony_elixir/workspace_and_config_test.exs`, add three tests: (a) flat `tracker.api_key` + nested `tracker.linear.api_key` with identical values + `kind == "linear"` → nested wins, single WARN logged per redundant flat key (FR-029); (b) divergent values → `{:error, {:tracker_config_conflict, :"tracker.api_key", :"tracker.linear.api_key"}}` (FR-030); (c) flat keys present + `kind == "jira"` → silently ignored (no WARN, no conflict — FR-028).
+- [x] T070 [FR-028, FR-029, FR-030, FR-034, FR-039] GREEN: extend `Config.Schema.finalize_settings/1` (flat→nested merge for Linear only) + `Config.validate!/0` (conflict detection) in `elixir/lib/symphony_elixir/config/schema.ex` and `elixir/lib/symphony_elixir/config.ex`. Guard existing `missing_linear_*` checks by `kind == "linear"` (FR-039). T069 passes.
 
 ### `base_url` shape validation
 
-- [ ] T071 [P] [FR-032, NFR-SEC-002] RED test: in `elixir/test/symphony_elixir/workspace_and_config_test.exs`, add tests: (a) `base_url: "http://acme.atlassian.net"` (not HTTPS) → preflight fail; (b) `base_url: "https://"` (no host) → fail; (c) `base_url: "https://acme.atlassian.net/"` (trailing slash) → pass; (d) `base_url: "https://acme.atlassian.net"` → pass.
-- [ ] T072 [FR-032] GREEN: implement `base_url` shape validation in `Config.validate!/0` (`elixir/lib/symphony_elixir/config.ex`) per FR-032: non-empty `https://<host>` with parseable host (use `URI.parse/1`; `scheme == "https"`, `host` non-empty). No allowlist (SEC-3). T071 passes.
+- [x] T071 [P] [FR-032, NFR-SEC-002] RED test: in `elixir/test/symphony_elixir/workspace_and_config_test.exs`, add tests: (a) `base_url: "http://acme.atlassian.net"` (not HTTPS) → preflight fail; (b) `base_url: "https://"` (no host) → fail; (c) `base_url: "https://acme.atlassian.net/"` (trailing slash) → pass; (d) `base_url: "https://acme.atlassian.net"` → pass.
+- [x] T072 [FR-032] GREEN: implement `base_url` shape validation in `Config.validate!/0` (`elixir/lib/symphony_elixir/config.ex`) per FR-032: non-empty `https://<host>` with parseable host (use `URI.parse/1`; `scheme == "https"`, `host` non-empty). No allowlist (SEC-3). T071 passes.
 
 ### Telemetry dep + event registration test
 
