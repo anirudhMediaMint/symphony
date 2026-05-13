@@ -221,6 +221,152 @@ defmodule SymphonyElixir.Jira.ClientTest do
     end
   end
 
+  describe "validate_state_resolvability_for/1 (T041, US5, FR-037, FR-038)" do
+    setup do
+      env_var = "JIRA_API_TOKEN_T041_#{System.unique_integer([:positive])}"
+      previous = System.get_env(env_var)
+      System.put_env(env_var, "fake-jira-token-not-real")
+
+      on_exit(fn ->
+        case previous do
+          nil -> System.delete_env(env_var)
+          val -> System.put_env(env_var, val)
+        end
+      end)
+
+      workflow_root =
+        Path.join(
+          System.tmp_dir!(),
+          "symphony-elixir-jira-client-test-t041-#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(workflow_root)
+      workflow_file = Path.join(workflow_root, "WORKFLOW.md")
+
+      File.write!(workflow_file, """
+      ---
+      tracker:
+        kind: "jira"
+        active_states: ["Todo", "In Progress"]
+        terminal_states: ["Closed", "Done"]
+        jira:
+          base_url: "https://jira.test"
+          email: "dev@example.com"
+          api_token: "$#{env_var}"
+          jql: "project = ENG OR project = ACME OR summary ~ \\"PROJ\\""
+      polling:
+        interval_ms: 30000
+      ---
+      You are an agent for this repository.
+      """)
+
+      SymphonyElixir.Workflow.set_workflow_file_path(workflow_file)
+
+      if Process.whereis(SymphonyElixir.WorkflowStore) do
+        try do
+          SymphonyElixir.WorkflowStore.force_reload()
+        catch
+          :exit, _ -> :ok
+        end
+      end
+
+      on_exit(fn ->
+        Application.delete_env(:symphony_elixir, :workflow_file_path)
+        File.rm_rf(workflow_root)
+      end)
+
+      {:ok, env_var: env_var}
+    end
+
+    test "case-insensitive match; project keys extracted only from JQL identifiers (not string literals); per-project createmeta aggregated; unresolved names returned" do
+      test_pid = self()
+
+      # Per-project createmeta responses keyed by projectKeys query param.
+      # ENG project reaches {Todo, In Progress, Done}; ACME reaches {Closed, Backlog}.
+      # Union: {Todo, In Progress, Done, Closed, Backlog} (case-insensitive).
+      # Input states: ["Todo", "in progress", "Code Review", "DONE", "Closed"]
+      # Unresolved: ["Code Review"] (case preserved from input).
+      # PROJ in string literal must NOT yield a createmeta call.
+      fake_request = fn :get, url, _headers, _body ->
+        send(test_pid, {:jira_createmeta_request, url})
+
+        cond do
+          String.contains?(url, "projectKeys=ENG") ->
+            {:ok,
+             %{
+               status: 200,
+               body: %{
+                 "projects" => [
+                   %{
+                     "issuetypes" => [
+                       %{
+                         "name" => "Task",
+                         "statuses" => [
+                           %{"name" => "Todo"},
+                           %{"name" => "In Progress"},
+                           %{"name" => "Done"}
+                         ]
+                       }
+                     ]
+                   }
+                 ]
+               }
+             }}
+
+          String.contains?(url, "projectKeys=ACME") ->
+            {:ok,
+             %{
+               status: 200,
+               body: %{
+                 "projects" => [
+                   %{
+                     "issuetypes" => [
+                       %{
+                         "name" => "Bug",
+                         "statuses" => [
+                           %{"name" => "Closed"},
+                           %{"name" => "Backlog"}
+                         ]
+                       }
+                     ]
+                   }
+                 ]
+               }
+             }}
+
+          true ->
+            send(test_pid, {:unexpected_url, url})
+            {:ok, %{status: 404, body: %{}}}
+        end
+      end
+
+      assert {:ok, ["Code Review"]} =
+               SymphonyElixir.Jira.Client.validate_state_resolvability_for(
+                 ["Todo", "in progress", "Code Review", "DONE", "Closed"],
+                 request_fun: fake_request
+               )
+
+      # Two distinct projects → two requests, no third.
+      assert_receive {:jira_createmeta_request, url1}
+      assert_receive {:jira_createmeta_request, url2}
+
+      requested =
+        [url1, url2]
+        |> Enum.map(fn u ->
+          %URI{query: q} = URI.parse(u)
+          %{"projectKeys" => key} = URI.decode_query(q)
+          key
+        end)
+        |> Enum.sort()
+
+      assert requested == ["ACME", "ENG"]
+
+      # PROJ was inside a string literal — MUST NOT be treated as a project key.
+      refute_received {:jira_createmeta_request, _}
+      refute_received {:unexpected_url, _}
+    end
+  end
+
   describe "apply_priority_map_for_test/2 (T020, FR-016)" do
     test "default map maps Highest/High/Medium/Low/Lowest -> 1..5" do
       assert Client.apply_priority_map_for_test("Highest", %{}) == 1
