@@ -120,36 +120,63 @@ defmodule SymphonyElixir.Jira.Client do
 
         {:ok, normalized}
 
-      {:ok, %{status: 200, body: body}} ->
-        Logger.error("jira_unknown_payload body=#{summarize_error_body(body)}")
-        {:error, {:jira_unknown_payload, summarize_error_body(body)}}
-
-      {:ok, %{status: status, body: body}} when status in 300..399 ->
-        Logger.error("jira_unexpected_redirect status=#{status}")
-        _ = body
-        {:error, {:jira_unexpected_redirect, status}}
-
-      {:ok, %{status: 400, body: body}} ->
-        Logger.error("jira_invalid_jql body=#{summarize_error_body(body)}")
-        {:error, {:jira_invalid_jql, summarize_error_body(body)}}
-
-      {:ok, %{status: 401}} ->
-        Logger.error("tracker_unauthorized: jira")
-        {:error, :tracker_unauthorized}
-
-      {:ok, %{status: 403}} ->
-        Logger.error("tracker_forbidden: jira")
-        {:error, {:tracker_forbidden, %{project_key: nil}}}
-
-      {:ok, %{status: status, body: body}} ->
-        Logger.error("jira_api_status=#{status} body=#{summarize_error_body(body)}")
-        {:error, {:jira_api_status, status}}
+      {:ok, response} ->
+        classify_error_response(response, url)
 
       {:error, reason} ->
         Logger.error("jira_api_request: #{inspect(reason)}")
         {:error, {:jira_api_request, reason}}
     end
   end
+
+  # Maps non-2xx Jira responses to the typed error catalog. URL-aware: 400 on
+  # /rest/api/3/search/jql becomes :jira_invalid_jql (FR-040, US3); 400 on other
+  # endpoints falls through to :jira_api_status until those endpoints add their
+  # own classifications. The error tuple/log NEVER includes auth headers (FR-042,
+  # NFR-SEC-008) — only the response body excerpt, truncated by summarize_error_body/1.
+  defp classify_error_response(%{status: 200, body: body}, _url) do
+    Logger.error("jira_unknown_payload body=#{summarize_error_body(body)}")
+    {:error, {:jira_unknown_payload, summarize_error_body(body)}}
+  end
+
+  defp classify_error_response(%{status: status}, _url) when status in 300..399 do
+    Logger.error("jira_unexpected_redirect status=#{status}")
+    {:error, {:jira_unexpected_redirect, status}}
+  end
+
+  defp classify_error_response(%{status: 400, body: body}, url) do
+    if search_jql_path?(url) do
+      Logger.error("jira_invalid_jql body=#{summarize_error_body(body)}")
+      {:error, {:jira_invalid_jql, summarize_error_body(body)}}
+    else
+      Logger.error("jira_api_status=400 body=#{summarize_error_body(body)}")
+      {:error, {:jira_api_status, 400}}
+    end
+  end
+
+  defp classify_error_response(%{status: 401}, _url) do
+    Logger.error("tracker_unauthorized: jira")
+    {:error, :tracker_unauthorized}
+  end
+
+  defp classify_error_response(%{status: 403}, _url) do
+    Logger.error("tracker_forbidden: jira")
+    {:error, {:tracker_forbidden, %{project_key: nil}}}
+  end
+
+  defp classify_error_response(%{status: status, body: body}, _url) do
+    Logger.error("jira_api_status=#{status} body=#{summarize_error_body(body)}")
+    {:error, {:jira_api_status, status}}
+  end
+
+  defp search_jql_path?(url) when is_binary(url) do
+    case URI.parse(url) do
+      %URI{path: path} when is_binary(path) -> String.contains?(path, "/rest/api/3/search/jql")
+      _ -> false
+    end
+  end
+
+  defp search_jql_path?(_url), do: false
 
   defp build_search_url(base_url, jql, max_issues_per_poll) do
     max_results = jira_max_results(max_issues_per_poll)
