@@ -773,4 +773,130 @@ defmodule SymphonyElixir.Jira.ClientTest do
       refute log =~ "fake-jira-token-not-real"
     end
   end
+
+  describe "fetch_candidate_issues/1 multi-page pagination (T054, FR-010, FR-011)" do
+    setup do
+      env_var = "JIRA_API_TOKEN_T054_#{System.unique_integer([:positive])}"
+      previous = System.get_env(env_var)
+      System.put_env(env_var, "fake-jira-token-not-real")
+
+      on_exit(fn ->
+        case previous do
+          nil -> System.delete_env(env_var)
+          val -> System.put_env(env_var, val)
+        end
+      end)
+
+      workflow_root =
+        Path.join(
+          System.tmp_dir!(),
+          "symphony-elixir-jira-client-test-t054-#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(workflow_root)
+      workflow_file = Path.join(workflow_root, "WORKFLOW.md")
+
+      File.write!(workflow_file, """
+      ---
+      tracker:
+        kind: "jira"
+        active_states: ["Todo", "In Progress"]
+        terminal_states: ["Closed", "Done"]
+        jira:
+          base_url: "https://jira.test"
+          email: "dev@example.com"
+          api_token: "$#{env_var}"
+          jql: "project = ENG"
+      polling:
+        interval_ms: 30000
+      ---
+      You are an agent for this repository.
+      """)
+
+      SymphonyElixir.Workflow.set_workflow_file_path(workflow_file)
+
+      if Process.whereis(SymphonyElixir.WorkflowStore) do
+        try do
+          SymphonyElixir.WorkflowStore.force_reload()
+        catch
+          :exit, _ -> :ok
+        end
+      end
+
+      on_exit(fn ->
+        Application.delete_env(:symphony_elixir, :workflow_file_path)
+        File.rm_rf(workflow_root)
+      end)
+
+      :ok
+    end
+
+    test "follows nextPageToken across pages; ignores isLast; returns merged issues" do
+      test_pid = self()
+
+      page1_issues =
+        for i <- 1..100 do
+          %{
+            "id" => Integer.to_string(10_000 + i),
+            "key" => "ENG-#{i}",
+            "fields" => %{
+              "summary" => "Issue #{i}",
+              "status" => %{"name" => "Todo"}
+            }
+          }
+        end
+
+      page2_issues =
+        for i <- 101..200 do
+          %{
+            "id" => Integer.to_string(10_000 + i),
+            "key" => "ENG-#{i}",
+            "fields" => %{
+              "summary" => "Issue #{i}",
+              "status" => %{"name" => "Todo"}
+            }
+          }
+        end
+
+      fake_request = fn :get, url, _headers, _body ->
+        send(test_pid, {:jira_request, url})
+
+        cond do
+          String.contains?(url, "nextPageToken=abc") ->
+            # Page 2 — no nextPageToken; isLast=false MUST be ignored.
+            {:ok,
+             %{
+               status: 200,
+               body: %{
+                 "issues" => page2_issues,
+                 "isLast" => false
+               }
+             }}
+
+          true ->
+            # Page 1 — issues + nextPageToken; isLast=true MUST be ignored
+            # (we follow the token regardless).
+            {:ok,
+             %{
+               status: 200,
+               body: %{
+                 "issues" => page1_issues,
+                 "nextPageToken" => "abc",
+                 "isLast" => true
+               }
+             }}
+        end
+      end
+
+      assert {:ok, issues} = Client.fetch_candidate_issues(request_fun: fake_request)
+      assert length(issues) == 200
+      assert hd(issues).identifier == "ENG-1"
+      assert List.last(issues).identifier == "ENG-200"
+
+      assert_receive {:jira_request, url1}
+      assert_receive {:jira_request, url2}
+      refute String.contains?(url1, "nextPageToken")
+      assert String.contains?(url2, "nextPageToken=abc")
+    end
+  end
 end
