@@ -471,8 +471,6 @@ defmodule SymphonyElixir.Config.Schema do
     %{jira | api_token: resolve_jira_api_token(jira.api_token)}
   end
 
-  defp finalize_jira_tracker(jira), do: jira
-
   # FR-028, FR-029: merge nested Linear key into the flat field when the flat
   # field is absent or identical. Divergent values are NOT merged here —
   # `Config.validate!/0` produces a `:tracker_config_conflict` error in that
@@ -483,8 +481,6 @@ defmodule SymphonyElixir.Config.Schema do
   defp merge_linear_field(flat, nested) when is_binary(flat) and is_binary(nested) do
     if flat == nested, do: nested, else: flat
   end
-
-  defp merge_linear_field(flat, _nested), do: flat
 
   # FR-031: Only `$JIRA_API_TOKEN` (or any `$VAR` reference) is accepted.
   # Literal tokens in `WORKFLOW.md` resolve to `nil`, which `Config.validate!/0`
@@ -505,8 +501,6 @@ defmodule SymphonyElixir.Config.Schema do
         nil
     end
   end
-
-  defp resolve_jira_api_token(_value), do: nil
 
   defp normalize_keys(value) when is_map(value) do
     Enum.reduce(value, %{}, fn {key, raw_value}, normalized ->

@@ -1348,6 +1348,39 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert Config.settings!().tracker.jira.api_token == "fake-jira-token-not-real"
     end
 
+    test "Config.finalize_settings/1: $VAR-ref to an empty env var resolves to nil (FR-031, T077 cover schema L499)" do
+      env_var = "JIRA_API_TOKEN_EMPTY_#{System.unique_integer([:positive])}"
+      previous = System.get_env(env_var)
+      # Explicitly set to empty string — distinct from "unset".
+      System.put_env(env_var, "")
+
+      on_exit(fn -> restore_env(env_var, previous) end)
+
+      write_jira_workflow_file!(Workflow.workflow_file_path(),
+        base_url: "https://jira.test",
+        email: "dev@example.com",
+        api_token: "$#{env_var}",
+        jql: "project = ENG"
+      )
+
+      # Empty env var → api_token: nil → preflight surfaces missing_tracker_config.
+      assert {:error, {:missing_tracker_config, :"tracker.jira.api_token"}} =
+               Config.validate!()
+    end
+
+    test "Config.finalize_settings/1: literal (non-$VAR) api_token => nil (FR-031, T077 cover schema L503)" do
+      write_jira_workflow_file!(Workflow.workflow_file_path(),
+        base_url: "https://jira.test",
+        email: "dev@example.com",
+        # No leading `$` → not a $VAR reference → rejected as a literal.
+        api_token: "literal-token-not-a-ref",
+        jql: "project = ENG"
+      )
+
+      assert {:error, {:missing_tracker_config, :"tracker.jira.api_token"}} =
+               Config.validate!()
+    end
+
     test "tracker.jira.description_format: \"adf\" causes normalization to pass raw ADF map into Issue.description (T060, FR-023)" do
       env_var = "JIRA_API_TOKEN_T060_#{System.unique_integer([:positive])}"
       previous = System.get_env(env_var)
