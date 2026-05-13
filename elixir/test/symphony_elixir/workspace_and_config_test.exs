@@ -1449,11 +1449,59 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  describe "Jira 30s poll floor preflight (US4, T035, FR-036)" do
+    setup do
+      env_var = "JIRA_API_TOKEN_US4_#{System.unique_integer([:positive])}"
+      previous = System.get_env(env_var)
+      System.put_env(env_var, "fake-jira-token-not-real")
+
+      on_exit(fn -> restore_env(env_var, previous) end)
+
+      {:ok, env_var: env_var}
+    end
+
+    test "(a) jira + 5000ms + no override fails with jira_poll_interval_too_aggressive",
+         %{env_var: env_var} do
+      write_jira_workflow_file!(Workflow.workflow_file_path(),
+        base_url: "https://jira.test",
+        email: "dev@example.com",
+        api_token: "$#{env_var}",
+        jql: "project = ENG",
+        poll_interval_ms: 5_000
+      )
+
+      assert {:error,
+              {:jira_poll_interval_too_aggressive, 5_000, 30_000,
+               :"tracker.jira.allow_aggressive_polling"}} = Config.validate!()
+    end
+
+    test "(b) jira + 5000ms + allow_aggressive_polling: true passes",
+         %{env_var: env_var} do
+      write_jira_workflow_file!(Workflow.workflow_file_path(),
+        base_url: "https://jira.test",
+        email: "dev@example.com",
+        api_token: "$#{env_var}",
+        jql: "project = ENG",
+        poll_interval_ms: 5_000,
+        allow_aggressive_polling: true
+      )
+
+      assert :ok = Config.validate!()
+    end
+
+    test "(c) linear + 5000ms passes (FR-036 fires only when tracker.kind == jira)" do
+      write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: 5_000)
+
+      assert :ok = Config.validate!()
+    end
+  end
+
   defp write_jira_workflow_file!(path, opts) do
     base_url = Keyword.fetch!(opts, :base_url)
     email = Keyword.fetch!(opts, :email)
     api_token = Keyword.fetch!(opts, :api_token)
     poll_interval_ms = Keyword.get(opts, :poll_interval_ms, 30_000)
+    allow_aggressive_polling = Keyword.get(opts, :allow_aggressive_polling, false)
 
     jql_yaml_scalar =
       case Keyword.fetch(opts, :jql_yaml) do
@@ -1472,6 +1520,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
         email: "#{email}"
         api_token: "#{api_token}"
         jql: #{jql_yaml_scalar}
+        allow_aggressive_polling: #{allow_aggressive_polling}
     polling:
       interval_ms: #{poll_interval_ms}
     ---
