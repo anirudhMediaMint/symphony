@@ -82,6 +82,126 @@ defmodule SymphonyElixir.Jira.Client do
   end
 
   @doc """
+  Verifies that the given workflow state names are reachable in the projects
+  referenced by `tracker.jira.jql`.
+
+  Algorithm (research.md R-5):
+    1. Extract distinct project keys from JQL (literal-aware — keys inside
+       string literals are ignored). Reuses `Config.extract_project_keys/1`.
+    2. For each project key, GET `/rest/api/3/issue/createmeta?projectKeys=KEY
+       &expand=projects.issuetypes.workflowscheme` serially (v1, FR-038 +
+       NFR-PERF-003).
+    3. Aggregate reachable status names across all issuetypes case-insensitively.
+    4. Return `{:ok, unresolved}` where `unresolved` is the input names that
+       did NOT match any reachable status (case preserved from input).
+
+  Accepts `request_fun:` for test injection (FR-012). On transport failure
+  returns `{:error, term()}` — Config.validate!/0 fail-opens (FR-037).
+  """
+  @spec validate_state_resolvability_for([String.t()]) ::
+          {:ok, [String.t()]} | {:error, term()}
+  def validate_state_resolvability_for(state_names) when is_list(state_names),
+    do: validate_state_resolvability_for(state_names, [])
+
+  @spec validate_state_resolvability_for([String.t()], keyword()) ::
+          {:ok, [String.t()]} | {:error, term()}
+  def validate_state_resolvability_for(state_names, opts)
+      when is_list(state_names) and is_list(opts) do
+    request_fun = Keyword.get(opts, :request_fun, &default_request/4)
+    jira = Config.settings!().tracker.jira
+
+    cond do
+      not is_binary(jira && jira.base_url) ->
+        {:error, {:missing_tracker_config, :"tracker.jira.base_url"}}
+
+      not is_binary(jira && jira.email) ->
+        {:error, {:missing_tracker_config, :"tracker.jira.email"}}
+
+      not is_binary(jira && jira.api_token) ->
+        {:error, {:missing_tracker_config, :"tracker.jira.api_token"}}
+
+      not is_binary(jira && jira.jql) ->
+        {:error, {:missing_tracker_config, :"tracker.jira.jql"}}
+
+      true ->
+        do_validate_state_resolvability_for(jira, state_names, request_fun)
+    end
+  end
+
+  defp do_validate_state_resolvability_for(jira, state_names, request_fun) do
+    project_keys = Config.extract_project_keys(jira.jql)
+
+    case fetch_reachable_statuses(project_keys, jira, request_fun, MapSet.new()) do
+      {:ok, reachable_lower} ->
+        unresolved =
+          Enum.reject(state_names, fn name ->
+            MapSet.member?(reachable_lower, String.downcase(to_string(name)))
+          end)
+
+        {:ok, unresolved}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp fetch_reachable_statuses([], _jira, _request_fun, acc), do: {:ok, acc}
+
+  defp fetch_reachable_statuses([key | rest], jira, request_fun, acc) do
+    url = build_createmeta_url(jira.base_url, key)
+    headers = build_request_headers(jira.email, jira.api_token)
+
+    case request_fun.(:get, url, headers, nil) do
+      {:ok, %{status: 200, body: body}} ->
+        statuses = collect_status_names(body)
+
+        new_acc =
+          Enum.reduce(statuses, acc, fn name, set ->
+            MapSet.put(set, String.downcase(name))
+          end)
+
+        fetch_reachable_statuses(rest, jira, request_fun, new_acc)
+
+      {:ok, %{status: status}} ->
+        Logger.error("jira_createmeta_status=#{status} projectKey=#{key}")
+        {:error, {:jira_createmeta_status, status}}
+
+      {:error, reason} ->
+        Logger.error("jira_createmeta_request: #{inspect(reason)}")
+        {:error, {:jira_createmeta_request, reason}}
+    end
+  end
+
+  defp build_createmeta_url(base_url, project_key) do
+    String.trim_trailing(base_url, "/") <>
+      "/rest/api/3/issue/createmeta?projectKeys=" <>
+      URI.encode_www_form(project_key) <>
+      "&expand=projects.issuetypes.workflowscheme"
+  end
+
+  defp collect_status_names(%{"projects" => projects}) when is_list(projects) do
+    projects
+    |> Enum.flat_map(fn
+      %{"issuetypes" => issuetypes} when is_list(issuetypes) ->
+        Enum.flat_map(issuetypes, fn
+          %{"statuses" => statuses} when is_list(statuses) ->
+            Enum.flat_map(statuses, fn
+              %{"name" => name} when is_binary(name) -> [name]
+              _ -> []
+            end)
+
+          _ ->
+            []
+        end)
+
+      _ ->
+        []
+    end)
+  end
+
+  defp collect_status_names(_body), do: []
+
+  @doc """
   Placeholder for reconciliation. Lands in T056 (Phase 11).
   """
   @spec fetch_issues_by_states([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}

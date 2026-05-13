@@ -200,6 +200,180 @@ defmodule SymphonyElixir.Config do
 
   defp validate_jql_no_order_by(_jql), do: :ok
 
+  @doc """
+  Extracts distinct project keys referenced by a JQL string.
+
+  Literal-aware: identifiers inside `"..."` or `'...'` string literals are
+  ignored (e.g. `summary ~ "PROJ"` does NOT yield `PROJ`). Reuses the same
+  string-literal recognition shape as `validate_jql_no_order_by/1` (research.md
+  R-3) so the two preflights stay consistent.
+
+  Recognized forms (case-insensitive `project` keyword):
+    * `project = KEY` / `project != KEY`
+    * `project in (K1, K2, ...)` / `project not in (...)`
+
+  Returns a list of unique uppercase-or-mixed-case identifiers in
+  declaration order.
+  """
+  @spec extract_project_keys(String.t()) :: [String.t()]
+  def extract_project_keys(jql) when is_binary(jql) do
+    jql
+    |> scan_project_keys(:default, [])
+    |> Enum.reverse()
+    |> Enum.uniq()
+  end
+
+  def extract_project_keys(_jql), do: []
+
+  # Scanner: same string-literal modes as scan_jql/2. In :default mode, after
+  # seeing the case-insensitive `project` keyword followed by whitespace, we
+  # consume the operator and value(s) and emit identifiers.
+  defp scan_project_keys(<<>>, _mode, acc), do: acc
+
+  defp scan_project_keys(<<?", rest::binary>>, :default, acc),
+    do: scan_project_keys(rest, :double_string, acc)
+
+  defp scan_project_keys(<<?', rest::binary>>, :default, acc),
+    do: scan_project_keys(rest, :single_string, acc)
+
+  defp scan_project_keys(<<p, r, o, j, e, c, t, ws, rest::binary>>, :default, acc)
+       when p in [?P, ?p] and r in [?R, ?r] and o in [?O, ?o] and j in [?J, ?j] and
+              e in [?E, ?e] and c in [?C, ?c] and t in [?T, ?t] and
+              ws in [?\s, ?\t, ?\n, ?\r] do
+    # Word-boundary check: previous-char check is implicit (start-of-input or a
+    # non-identifier char consumed before). The trailing `ws` enforces the
+    # right boundary so `projects` does not match.
+    {new_acc, after_value} = parse_project_predicate(rest, acc)
+    scan_project_keys(after_value, :default, new_acc)
+  end
+
+  defp scan_project_keys(<<_ch, rest::binary>>, :default, acc),
+    do: scan_project_keys(rest, :default, acc)
+
+  defp scan_project_keys(<<?\\, ?\\, rest::binary>>, :double_string, acc),
+    do: scan_project_keys(rest, :double_string, acc)
+
+  defp scan_project_keys(<<?", rest::binary>>, :double_string, acc),
+    do: scan_project_keys(rest, :default, acc)
+
+  defp scan_project_keys(<<_ch, rest::binary>>, :double_string, acc),
+    do: scan_project_keys(rest, :double_string, acc)
+
+  defp scan_project_keys(<<?\\, ?\\, rest::binary>>, :single_string, acc),
+    do: scan_project_keys(rest, :single_string, acc)
+
+  defp scan_project_keys(<<?', rest::binary>>, :single_string, acc),
+    do: scan_project_keys(rest, :default, acc)
+
+  defp scan_project_keys(<<_ch, rest::binary>>, :single_string, acc),
+    do: scan_project_keys(rest, :single_string, acc)
+
+  # Sits immediately after `project<ws>`. Skip extra whitespace, then dispatch
+  # on operator: `=`/`!=` → single ident; `in`/`not in` → parenthesised list.
+  # Any unrecognized operator returns acc unchanged with rest preserved so the
+  # outer scanner keeps walking.
+  defp parse_project_predicate(input, acc) do
+    rest = skip_ws(input)
+
+    case rest do
+      <<?=, more::binary>> ->
+        extract_single_ident(more, acc)
+
+      <<?!, ?=, more::binary>> ->
+        extract_single_ident(more, acc)
+
+      <<i, n, ws, more::binary>>
+      when i in [?I, ?i] and n in [?N, ?n] and ws in [?\s, ?\t, ?\n, ?\r] ->
+        extract_in_list(<<ws, more::binary>>, acc)
+
+      <<n, o, t, ws, more::binary>>
+      when n in [?N, ?n] and o in [?O, ?o] and t in [?T, ?t] and
+             ws in [?\s, ?\t, ?\n, ?\r] ->
+        rest_after_not = skip_ws(<<ws, more::binary>>)
+
+        case rest_after_not do
+          <<i, n2, ws2, in_more::binary>>
+          when i in [?I, ?i] and n2 in [?N, ?n] and ws2 in [?\s, ?\t, ?\n, ?\r] ->
+            extract_in_list(<<ws2, in_more::binary>>, acc)
+
+          _ ->
+            {acc, rest}
+        end
+
+      _ ->
+        {acc, rest}
+    end
+  end
+
+  defp extract_single_ident(input, acc) do
+    rest = skip_ws(input)
+
+    case rest do
+      # Quoted value — Jira accepts "KEY" but we ignore quoted forms here
+      # because the literal-aware scanner already handles them as data. Skip
+      # past the closing quote to keep the outer scanner aligned.
+      <<?", _::binary>> ->
+        {acc, rest}
+
+      <<?', _::binary>> ->
+        {acc, rest}
+
+      _ ->
+        case take_ident(rest, <<>>) do
+          {"", after_ident} -> {acc, after_ident}
+          {ident, after_ident} -> {[ident | acc], after_ident}
+        end
+    end
+  end
+
+  defp extract_in_list(input, acc) do
+    rest = skip_ws(input)
+
+    case rest do
+      <<?(, more::binary>> -> collect_in_idents(more, acc)
+      _ -> {acc, rest}
+    end
+  end
+
+  defp collect_in_idents(<<>>, acc), do: {acc, <<>>}
+  defp collect_in_idents(<<?), rest::binary>>, acc), do: {acc, rest}
+
+  defp collect_in_idents(<<ws, rest::binary>>, acc)
+       when ws in [?\s, ?\t, ?\n, ?\r, ?,],
+       do: collect_in_idents(rest, acc)
+
+  # Skip quoted values in IN-lists (they're not bare project keys).
+  defp collect_in_idents(<<?", rest::binary>>, acc) do
+    rest |> skip_until_quote(?") |> collect_in_idents(acc)
+  end
+
+  defp collect_in_idents(<<?', rest::binary>>, acc) do
+    rest |> skip_until_quote(?') |> collect_in_idents(acc)
+  end
+
+  defp collect_in_idents(input, acc) do
+    case take_ident(input, <<>>) do
+      {"", <<_, rest::binary>>} -> collect_in_idents(rest, acc)
+      {"", <<>>} -> {acc, <<>>}
+      {ident, after_ident} -> collect_in_idents(after_ident, [ident | acc])
+    end
+  end
+
+  defp skip_until_quote(<<>>, _q), do: <<>>
+  defp skip_until_quote(<<?\\, ?\\, rest::binary>>, q), do: skip_until_quote(rest, q)
+  defp skip_until_quote(<<q, rest::binary>>, q), do: rest
+  defp skip_until_quote(<<_ch, rest::binary>>, q), do: skip_until_quote(rest, q)
+
+  defp take_ident(<<ch, rest::binary>>, acc)
+       when ch in ?A..?Z or ch in ?a..?z or ch in ?0..?9 or ch == ?_ or ch == ?- do
+    take_ident(rest, <<acc::binary, ch>>)
+  end
+
+  defp take_ident(rest, acc), do: {acc, rest}
+
+  defp skip_ws(<<ws, rest::binary>>) when ws in [?\s, ?\t, ?\n, ?\r], do: skip_ws(rest)
+  defp skip_ws(rest), do: rest
+
   # End of input — no ORDER BY found.
   defp scan_jql(<<>>, _mode), do: :ok
 
