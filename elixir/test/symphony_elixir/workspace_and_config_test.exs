@@ -1303,4 +1303,98 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       File.rm_rf(test_root)
     end
   end
+
+  describe "tracker.jira config schema (US1)" do
+    test "Config.Schema.Tracker.Jira embedded sub-schema exposes FR-027 defaults" do
+      write_jira_workflow_file!(Workflow.workflow_file_path(),
+        base_url: "https://jira.test",
+        email: "dev@example.com",
+        api_token: "fake-jira-token-not-real",
+        jql: "project = ENG"
+      )
+
+      jira = Config.settings!().tracker.jira
+
+      assert jira.base_url == "https://jira.test"
+      assert jira.email == "dev@example.com"
+      assert jira.api_token == "fake-jira-token-not-real"
+      assert jira.jql == "project = ENG"
+      assert jira.priority_map == %{}
+      assert jira.max_issues_per_poll == 200
+      assert jira.allow_aggressive_polling == false
+      assert jira.description_format == "text"
+    end
+
+    test "Config.finalize_settings/1 resolves $JIRA_API_TOKEN env var into tracker.jira.api_token (FR-031)" do
+      env_var = "JIRA_API_TOKEN_TEST_#{System.unique_integer([:positive])}"
+      previous = System.get_env(env_var)
+      System.put_env(env_var, "fake-jira-token-not-real")
+
+      on_exit(fn -> restore_env(env_var, previous) end)
+
+      write_jira_workflow_file!(Workflow.workflow_file_path(),
+        base_url: "https://jira.test",
+        email: "dev@example.com",
+        api_token: "$#{env_var}",
+        jql: "project = ENG"
+      )
+
+      assert Config.settings!().tracker.jira.api_token == "fake-jira-token-not-real"
+    end
+
+    test "preflight returns missing_tracker_config tracker.jira.api_token when token is empty after $-resolution (FR-033)" do
+      env_var = "JIRA_API_TOKEN_MISSING_#{System.unique_integer([:positive])}"
+      previous = System.get_env(env_var)
+      System.delete_env(env_var)
+
+      on_exit(fn -> restore_env(env_var, previous) end)
+
+      write_jira_workflow_file!(Workflow.workflow_file_path(),
+        base_url: "https://jira.test",
+        email: "dev@example.com",
+        api_token: "$#{env_var}",
+        jql: "project = ENG"
+      )
+
+      assert {:error, {:missing_tracker_config, :"tracker.jira.api_token"}} =
+               Config.validate!()
+    end
+  end
+
+  defp write_jira_workflow_file!(path, opts) do
+    base_url = Keyword.fetch!(opts, :base_url)
+    email = Keyword.fetch!(opts, :email)
+    api_token = Keyword.fetch!(opts, :api_token)
+    jql = Keyword.fetch!(opts, :jql)
+    poll_interval_ms = Keyword.get(opts, :poll_interval_ms, 30_000)
+
+    workflow = """
+    ---
+    tracker:
+      kind: "jira"
+      active_states: ["Todo", "In Progress"]
+      terminal_states: ["Closed", "Done"]
+      jira:
+        base_url: "#{base_url}"
+        email: "#{email}"
+        api_token: "#{api_token}"
+        jql: "#{jql}"
+    polling:
+      interval_ms: #{poll_interval_ms}
+    ---
+    You are an agent for this repository.
+    """
+
+    File.write!(path, workflow)
+
+    if Process.whereis(SymphonyElixir.WorkflowStore) do
+      try do
+        SymphonyElixir.WorkflowStore.force_reload()
+      catch
+        :exit, _reason -> :ok
+      end
+    end
+
+    :ok
+  end
 end
