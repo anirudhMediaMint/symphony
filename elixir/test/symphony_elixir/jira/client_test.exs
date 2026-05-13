@@ -899,4 +899,127 @@ defmodule SymphonyElixir.Jira.ClientTest do
       assert String.contains?(url2, "nextPageToken=abc")
     end
   end
+
+  describe "fetch_candidate_issues/1 pagination cap (T055/T073, FR-011)" do
+    setup do
+      env_var = "JIRA_API_TOKEN_T055_#{System.unique_integer([:positive])}"
+      previous = System.get_env(env_var)
+      System.put_env(env_var, "fake-jira-token-not-real")
+
+      on_exit(fn ->
+        case previous do
+          nil -> System.delete_env(env_var)
+          val -> System.put_env(env_var, val)
+        end
+      end)
+
+      workflow_root =
+        Path.join(
+          System.tmp_dir!(),
+          "symphony-elixir-jira-client-test-t055-#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(workflow_root)
+      workflow_file = Path.join(workflow_root, "WORKFLOW.md")
+
+      long_jql = "project = ENG AND " <> String.duplicate("summary ~ \"x\" OR ", 30) <> "status = Todo"
+
+      File.write!(workflow_file, """
+      ---
+      tracker:
+        kind: "jira"
+        active_states: ["Todo", "In Progress"]
+        terminal_states: ["Closed", "Done"]
+        jira:
+          base_url: "https://jira.test"
+          email: "dev@example.com"
+          api_token: "$#{env_var}"
+          jql: "#{long_jql}"
+          max_issues_per_poll: 50
+      polling:
+        interval_ms: 30000
+      ---
+      You are an agent for this repository.
+      """)
+
+      SymphonyElixir.Workflow.set_workflow_file_path(workflow_file)
+
+      if Process.whereis(SymphonyElixir.WorkflowStore) do
+        try do
+          SymphonyElixir.WorkflowStore.force_reload()
+        catch
+          :exit, _ -> :ok
+        end
+      end
+
+      on_exit(fn ->
+        Application.delete_env(:symphony_elixir, :workflow_file_path)
+        File.rm_rf(workflow_root)
+      end)
+
+      {:ok, long_jql: long_jql}
+    end
+
+    test "truncates to cap, fires telemetry [:symphony, :tracker, :poll_cap_hit], and WARN logs cap/threshold/JQL≤200ch" do
+      test_pid = self()
+      handler_id = "poll-cap-hit-test-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler_id,
+        [:symphony, :tracker, :poll_cap_hit],
+        fn event, measurements, metadata, _config ->
+          send(test_pid, {:telemetry, event, measurements, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      # Page returns 100 issues (cap is 50); cap is hit on page 1.
+      page_issues =
+        for i <- 1..100 do
+          %{
+            "id" => Integer.to_string(20_000 + i),
+            "key" => "ENG-#{i}",
+            "fields" => %{
+              "summary" => "Capped #{i}",
+              "status" => %{"name" => "Todo"}
+            }
+          }
+        end
+
+      fake_request = fn :get, _url, _headers, _body ->
+        {:ok,
+         %{
+           status: 200,
+           body: %{"issues" => page_issues, "nextPageToken" => "next-page-token"}
+         }}
+      end
+
+      log =
+        capture_log(fn ->
+          assert {:ok, issues} = Client.fetch_candidate_issues(request_fun: fake_request)
+          assert length(issues) == 50
+        end)
+
+      # (c) telemetry event fires with exact measurements + metadata.
+      assert_receive {:telemetry, [:symphony, :tracker, :poll_cap_hit],
+                      %{count: 1}, %{tracker_kind: :jira}}
+
+      # (b) WARN log mentions cap (50), threshold, JQL truncated to ≤200 chars.
+      assert log =~ "[warning]" or log =~ "[warn]"
+      assert log =~ "poll_cap_hit"
+      assert log =~ "50"
+      # JQL excerpt must be truncated to at most 200 chars — verify by extracting
+      # the jql=... field and asserting its length.
+      jql_excerpt =
+        case Regex.run(~r/jql="([^"]*)"/, log) do
+          [_, captured] -> captured
+          _ -> ""
+        end
+
+      assert String.length(jql_excerpt) > 0
+      assert String.length(jql_excerpt) <= 200
+    end
+  end
 end
