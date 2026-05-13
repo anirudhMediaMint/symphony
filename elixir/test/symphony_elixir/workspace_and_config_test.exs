@@ -1306,10 +1306,16 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
   describe "tracker.jira config schema (US1)" do
     test "Config.Schema.Tracker.Jira embedded sub-schema exposes FR-027 defaults" do
+      env_var = "JIRA_API_TOKEN_DEFAULTS_#{System.unique_integer([:positive])}"
+      previous = System.get_env(env_var)
+      System.put_env(env_var, "fake-jira-token-not-real")
+
+      on_exit(fn -> restore_env(env_var, previous) end)
+
       write_jira_workflow_file!(Workflow.workflow_file_path(),
         base_url: "https://jira.test",
         email: "dev@example.com",
-        api_token: "fake-jira-token-not-real",
+        api_token: "$#{env_var}",
         jql: "project = ENG"
       )
 

@@ -119,7 +119,7 @@ defmodule SymphonyElixir.Config do
       is_nil(settings.tracker.kind) ->
         {:error, :missing_tracker_kind}
 
-      settings.tracker.kind not in ["linear", "memory"] ->
+      settings.tracker.kind not in ["linear", "jira", "memory"] ->
         {:error, {:unsupported_tracker_kind, settings.tracker.kind}}
 
       settings.tracker.kind == "linear" and not is_binary(settings.tracker.api_key) ->
@@ -128,10 +128,37 @@ defmodule SymphonyElixir.Config do
       settings.tracker.kind == "linear" and not is_binary(settings.tracker.project_slug) ->
         {:error, :missing_linear_project_slug}
 
+      settings.tracker.kind == "jira" ->
+        validate_jira_required_fields(settings.tracker.jira)
+
       true ->
         :ok
     end
   end
+
+  # FR-033: required `tracker.jira.*` fields. Checked in declaration order
+  # so the first missing field surfaces — operators fix one error at a time.
+  defp validate_jira_required_fields(jira) do
+    cond do
+      not present?(jira && jira.base_url) ->
+        {:error, {:missing_tracker_config, :"tracker.jira.base_url"}}
+
+      not present?(jira && jira.email) ->
+        {:error, {:missing_tracker_config, :"tracker.jira.email"}}
+
+      not present?(jira && jira.api_token) ->
+        {:error, {:missing_tracker_config, :"tracker.jira.api_token"}}
+
+      not present?(jira && jira.jql) ->
+        {:error, {:missing_tracker_config, :"tracker.jira.jql"}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp present?(value) when is_binary(value), do: String.trim(value) != ""
+  defp present?(_value), do: false
 
   defp format_config_error(reason) do
     case reason do
