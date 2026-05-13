@@ -288,11 +288,11 @@ These FRs do not map cleanly to one user story but are required by spec acceptan
 
 **Purpose**: US9 (P3) — `mix specs.check`, `mix coverage`, `mix lint`, `mix format`, `dialyzer`, `make all`. Doc updates. Constitution PATCH.
 
-- [ ] T074 [P] [Polish] Run `mix format --check-formatted` on the whole `elixir/` tree; run `mix format` if needed and commit. (NFR-Q-002.)
-- [ ] T075 [Polish] Run `mix specs.check`. Confirm every public `def` in `Jira.Adapter` and `Jira.Client` has `@spec` (FR-049, AC-001). Fix any gaps surgically.
-- [ ] T076 [Polish] Run `mix lint` (credo --strict). Address any violation surgically. (NFR-Q-002.)
-- [ ] T077 [Polish] Run `mix coverage`. Assert: (a) `SymphonyElixir.Jira.Adapter` at 100% line coverage (FR-048, NFR-Q-001, AC-005); (b) `SymphonyElixir.Jira.Client` on `ignore_modules` (T001 verifies). If `Jira.Adapter` coverage < 100%, add the missing test paths.
-- [ ] T078 [Polish] Run `mix dialyzer`. Address any new warning surgically. (NFR-Q-002.)
+- [x] T074 [P] [Polish] Run `mix format --check-formatted` on the whole `elixir/` tree; run `mix format` if needed and commit. (NFR-Q-002.)
+- [x] T075 [Polish] Run `mix specs.check`. Confirm every public `def` in `Jira.Adapter` and `Jira.Client` has `@spec` (FR-049, AC-001). Fix any gaps surgically.
+- [x] T076 [Polish] Run `mix lint` (credo --strict). Address any violation surgically. (NFR-Q-002.)
+- [x] T077 [Polish] Run `mix coverage`. Assert: (a) `SymphonyElixir.Jira.Adapter` at 100% line coverage (FR-048, NFR-Q-001, AC-005); (b) `SymphonyElixir.Jira.Client` on `ignore_modules` (T001 verifies). If `Jira.Adapter` coverage < 100%, add the missing test paths.
+- [x] T078 [Polish] Run `mix dialyzer`. Address any new warning surgically. (NFR-Q-002.)
 - [ ] T079 [Polish] Run `make all` end-to-end. Confirm exit code 0. (AC-006.)
 - [ ] T080 [P] [Polish] Update `elixir/README.md` Tracker section to list Jira alongside Linear, link to `quickstart.md`. Surgical change only — no rewriting of existing Linear copy. (Project CLAUDE.md "If behavior/config changes: update README.md, elixir/README.md, and/or WORKFLOW.md in same PR".)
 - [ ] T081 [P] [Polish] Update `WORKFLOW.md` or top-level `README.md` if either references "Linear is the only supported tracker" — replace with multi-tracker phrasing. Skip if no such phrasing exists.
