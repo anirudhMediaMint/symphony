@@ -399,4 +399,85 @@ defmodule SymphonyElixir.Jira.ClientTest do
     end
   end
 
+  describe "fetch_candidate_issues/1 with operator priority_map (T046, US6, FR-016)" do
+    test "end-to-end: issue with fields.priority.name == \"P0\" and priority_map %{\"P0\" => 1} yields Issue.priority == 1" do
+      env_var = "JIRA_API_TOKEN_T046_#{System.unique_integer([:positive])}"
+      previous = System.get_env(env_var)
+      System.put_env(env_var, "fake-jira-token-not-real")
+
+      on_exit(fn ->
+        case previous do
+          nil -> System.delete_env(env_var)
+          val -> System.put_env(env_var, val)
+        end
+      end)
+
+      workflow_root =
+        Path.join(
+          System.tmp_dir!(),
+          "symphony-elixir-jira-client-test-t046-#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(workflow_root)
+      workflow_file = Path.join(workflow_root, "WORKFLOW.md")
+
+      File.write!(workflow_file, """
+      ---
+      tracker:
+        kind: "jira"
+        active_states: ["Todo", "In Progress"]
+        terminal_states: ["Closed", "Done"]
+        jira:
+          base_url: "https://jira.test"
+          email: "dev@example.com"
+          api_token: "$#{env_var}"
+          jql: "project = ENG"
+          priority_map:
+            P0: 1
+            P1: 2
+      polling:
+        interval_ms: 30000
+      ---
+      You are an agent for this repository.
+      """)
+
+      SymphonyElixir.Workflow.set_workflow_file_path(workflow_file)
+
+      if Process.whereis(SymphonyElixir.WorkflowStore) do
+        try do
+          SymphonyElixir.WorkflowStore.force_reload()
+        catch
+          :exit, _ -> :ok
+        end
+      end
+
+      on_exit(fn ->
+        Application.delete_env(:symphony_elixir, :workflow_file_path)
+        File.rm_rf(workflow_root)
+      end)
+
+      fake_request = fn :get, _url, _headers, _body ->
+        {:ok,
+         %{
+           status: 200,
+           body: %{
+             "issues" => [
+               %{
+                 "id" => "10042",
+                 "key" => "ENG-100",
+                 "fields" => %{
+                   "summary" => "Custom priority issue",
+                   "priority" => %{"name" => "P0"},
+                   "status" => %{"name" => "In Progress"}
+                 }
+               }
+             ]
+           }
+         }}
+      end
+
+      assert {:ok, [issue]} = Client.fetch_candidate_issues(request_fun: fake_request)
+      assert %Issue{identifier: "ENG-100", priority: 1} = issue
+    end
+  end
 end
