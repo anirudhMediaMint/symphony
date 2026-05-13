@@ -67,23 +67,30 @@ defmodule SymphonyElixir.Jira.Client do
     request_fun = Keyword.get(opts, :request_fun, &default_request/4)
     jira = Config.settings!().tracker.jira
 
-    cond do
-      not is_binary(jira && jira.base_url) ->
-        {:error, {:missing_tracker_config, :"tracker.jira.base_url"}}
-
-      not is_binary(jira && jira.email) ->
-        {:error, {:missing_tracker_config, :"tracker.jira.email"}}
-
-      not is_binary(jira && jira.api_token) ->
-        {:error, {:missing_tracker_config, :"tracker.jira.api_token"}}
-
-      not is_binary(jira && jira.jql) ->
-        {:error, {:missing_tracker_config, :"tracker.jira.jql"}}
-
-      true ->
-        do_fetch_candidate_issues(jira, request_fun)
+    case check_required_jira_fields(jira, [:base_url, :email, :api_token, :jql]) do
+      :ok -> do_fetch_candidate_issues(jira, request_fun)
+      {:error, _} = error -> error
     end
   end
+
+  # Walks the field list in order; returns :ok or the first
+  # {:error, {:missing_tracker_config, :"tracker.jira.<field>"}} encountered.
+  defp check_required_jira_fields(jira, fields) do
+    Enum.reduce_while(fields, :ok, fn field, _acc ->
+      value = jira && Map.get(jira, field)
+
+      if is_binary(value) do
+        {:cont, :ok}
+      else
+        {:halt, {:error, {:missing_tracker_config, jira_field_atom(field)}}}
+      end
+    end)
+  end
+
+  defp jira_field_atom(:base_url), do: :"tracker.jira.base_url"
+  defp jira_field_atom(:email), do: :"tracker.jira.email"
+  defp jira_field_atom(:api_token), do: :"tracker.jira.api_token"
+  defp jira_field_atom(:jql), do: :"tracker.jira.jql"
 
   @doc """
   Verifies that the given workflow state names are reachable in the projects
@@ -114,21 +121,9 @@ defmodule SymphonyElixir.Jira.Client do
     request_fun = Keyword.get(opts, :request_fun, &default_request/4)
     jira = Config.settings!().tracker.jira
 
-    cond do
-      not is_binary(jira && jira.base_url) ->
-        {:error, {:missing_tracker_config, :"tracker.jira.base_url"}}
-
-      not is_binary(jira && jira.email) ->
-        {:error, {:missing_tracker_config, :"tracker.jira.email"}}
-
-      not is_binary(jira && jira.api_token) ->
-        {:error, {:missing_tracker_config, :"tracker.jira.api_token"}}
-
-      not is_binary(jira && jira.jql) ->
-        {:error, {:missing_tracker_config, :"tracker.jira.jql"}}
-
-      true ->
-        do_validate_state_resolvability_for(jira, state_names, request_fun)
+    case check_required_jira_fields(jira, [:base_url, :email, :api_token, :jql]) do
+      :ok -> do_validate_state_resolvability_for(jira, state_names, request_fun)
+      {:error, _} = error -> error
     end
   end
 
@@ -292,21 +287,7 @@ defmodule SymphonyElixir.Jira.Client do
       case request_fun.(:get, url, headers, nil) do
         {:ok, %{status: 200, body: %{"transitions" => transitions}}}
         when is_list(transitions) ->
-          target_down = String.downcase(target_state_name)
-
-          matches =
-            Enum.filter(transitions, fn t ->
-              case get_in(t, ["to", "name"]) do
-                name when is_binary(name) -> String.downcase(name) == target_down
-                _ -> false
-              end
-            end)
-
-          case matches do
-            [] -> {:error, :state_transition_not_available}
-            [match] -> {:ok, Map.get(match, "id")}
-            _ -> {:error, :state_transition_ambiguous}
-          end
+          match_transition(transitions, target_state_name)
 
         {:ok, response} ->
           classify_error_response(response, url, jira.jql)
@@ -315,6 +296,24 @@ defmodule SymphonyElixir.Jira.Client do
           Logger.error("jira_api_request: #{inspect(reason)}")
           {:error, {:jira_api_request, reason}}
       end
+    end
+  end
+
+  defp match_transition(transitions, target_state_name) do
+    target_down = String.downcase(target_state_name)
+
+    matches =
+      Enum.filter(transitions, fn t ->
+        case get_in(t, ["to", "name"]) do
+          name when is_binary(name) -> String.downcase(name) == target_down
+          _ -> false
+        end
+      end)
+
+    case matches do
+      [] -> {:error, :state_transition_not_available}
+      [match] -> {:ok, Map.get(match, "id")}
+      _ -> {:error, :state_transition_ambiguous}
     end
   end
 
@@ -369,33 +368,26 @@ defmodule SymphonyElixir.Jira.Client do
   # request_fun}` or an error tuple if required fields are missing.
   defp resolve_write_path_config(opts) do
     request_fun = Keyword.get(opts, :request_fun, &default_request/4)
+    jira = build_write_path_jira(opts)
 
-    jira =
-      case Keyword.get(opts, :base_url) do
-        nil ->
-          Config.settings!().tracker.jira
+    case check_required_jira_fields(jira, [:base_url, :email, :api_token]) do
+      :ok -> {:ok, jira, request_fun}
+      {:error, _} = error -> error
+    end
+  end
 
-        base_url when is_binary(base_url) ->
-          %{
-            base_url: base_url,
-            email: Keyword.fetch!(opts, :email),
-            api_token: Keyword.fetch!(opts, :api_token),
-            jql: Keyword.get(opts, :jql)
-          }
-      end
+  defp build_write_path_jira(opts) do
+    case Keyword.get(opts, :base_url) do
+      nil ->
+        Config.settings!().tracker.jira
 
-    cond do
-      not is_binary(jira && jira.base_url) ->
-        {:error, {:missing_tracker_config, :"tracker.jira.base_url"}}
-
-      not is_binary(jira && jira.email) ->
-        {:error, {:missing_tracker_config, :"tracker.jira.email"}}
-
-      not is_binary(jira && jira.api_token) ->
-        {:error, {:missing_tracker_config, :"tracker.jira.api_token"}}
-
-      true ->
-        {:ok, jira, request_fun}
+      base_url when is_binary(base_url) ->
+        %{
+          base_url: base_url,
+          email: Keyword.fetch!(opts, :email),
+          api_token: Keyword.fetch!(opts, :api_token),
+          jql: Keyword.get(opts, :jql)
+        }
     end
   end
 
@@ -418,36 +410,7 @@ defmodule SymphonyElixir.Jira.Client do
     case request_fun.(:get, url, headers, nil) do
       {:ok, %{status: 200, body: %{"issues" => issues} = body} = response}
       when is_list(issues) ->
-        log_request_success(:get, url, response.status)
-
-        normalized =
-          issues
-          |> Enum.map(
-            &normalize_issue(
-              &1,
-              jira.base_url,
-              jira.priority_map || %{},
-              jira.description_format || "text"
-            )
-          )
-          |> Enum.reject(&is_nil/1)
-
-        merged = acc ++ normalized
-        next_token = Map.get(body, "nextPageToken")
-        more_pages? = is_binary(next_token) and next_token != ""
-
-        cond do
-          length(merged) >= cap and (length(merged) > cap or more_pages?) ->
-            truncated = Enum.take(merged, cap)
-            emit_poll_cap_hit(jira.jql, cap)
-            {:ok, truncated}
-
-          more_pages? ->
-            fetch_pages_loop(jira, request_fun, next_token, merged, cap)
-
-          true ->
-            {:ok, merged}
-        end
+        handle_search_page(jira, request_fun, acc, cap, url, response, issues, body)
 
       {:ok, response} ->
         classify_error_response(response, url, jira.jql)
@@ -455,6 +418,39 @@ defmodule SymphonyElixir.Jira.Client do
       {:error, reason} ->
         Logger.error("jira_api_request: #{inspect(reason)}")
         {:error, {:jira_api_request, reason}}
+    end
+  end
+
+  defp handle_search_page(jira, request_fun, acc, cap, url, response, issues, body) do
+    log_request_success(:get, url, response.status)
+
+    normalized =
+      issues
+      |> Enum.map(
+        &normalize_issue(
+          &1,
+          jira.base_url,
+          jira.priority_map || %{},
+          jira.description_format || "text"
+        )
+      )
+      |> Enum.reject(&is_nil/1)
+
+    merged = acc ++ normalized
+    next_token = Map.get(body, "nextPageToken")
+    more_pages? = is_binary(next_token) and next_token != ""
+
+    cond do
+      length(merged) >= cap and (length(merged) > cap or more_pages?) ->
+        truncated = Enum.take(merged, cap)
+        emit_poll_cap_hit(jira.jql, cap)
+        {:ok, truncated}
+
+      more_pages? ->
+        fetch_pages_loop(jira, request_fun, next_token, merged, cap)
+
+      true ->
+        {:ok, merged}
     end
   end
 
