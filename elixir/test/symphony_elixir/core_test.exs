@@ -992,6 +992,40 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt == "Retry #2"
   end
 
+  test "prompt builder renders identically for Linear- and Jira-sourced Tracker.Issue modulo branch_name (US8)" do
+    workflow_prompt =
+      "id={{ issue.identifier }} title={{ issue.title }} state={{ issue.state }} " <>
+        "url={{ issue.url }} labels={{ issue.labels }} desc={{ issue.description }} " <>
+        "branch={{ issue.branch_name }}"
+
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
+
+    common = [
+      id: "issue-uuid-1",
+      identifier: "MT-808",
+      title: "Portable issue",
+      description: "Same body across adapters",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-808",
+      labels: ["portability"],
+      priority: 2,
+      assignee_id: "user-1"
+    ]
+
+    linear_issue = struct(Issue, [{:branch_name, "feature/mt-808-portable-issue"} | common])
+    jira_issue = struct(Issue, [{:branch_name, nil} | common])
+
+    linear_prompt = PromptBuilder.build_prompt(linear_issue)
+    jira_prompt = PromptBuilder.build_prompt(jira_issue)
+
+    assert linear_prompt =~ "branch=feature/mt-808-portable-issue"
+    assert jira_prompt =~ "branch="
+    refute jira_prompt =~ "feature/mt-808-portable-issue"
+
+    # Output identical modulo the branch_name substitution (US8 scenarios 1+2).
+    assert String.replace(linear_prompt, "feature/mt-808-portable-issue", "") == jira_prompt
+  end
+
   test "agent runner keeps workspace after successful codex run" do
     test_root =
       Path.join(
