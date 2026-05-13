@@ -264,14 +264,15 @@ defmodule SymphonyElixir.Jira.Client do
 
         merged = acc ++ normalized
         next_token = Map.get(body, "nextPageToken")
+        more_pages? = is_binary(next_token) and next_token != ""
 
         cond do
-          length(merged) >= cap ->
+          length(merged) >= cap and (length(merged) > cap or more_pages?) ->
             truncated = Enum.take(merged, cap)
             emit_poll_cap_hit(jira.jql, cap)
             {:ok, truncated}
 
-          is_binary(next_token) and next_token != "" ->
+          more_pages? ->
             fetch_pages_loop(jira, request_fun, next_token, merged, cap)
 
           true ->
