@@ -555,4 +555,134 @@ defmodule SymphonyElixir.Jira.ClientTest do
       refute inspect(result) =~ "Basic "
     end
   end
+
+  describe "fetch_candidate_issues/1 maps HTTP 403 to tracker_forbidden with project_key (T049, US7, FR-040)" do
+    test "single-project JQL — error carries project_key derived from JQL" do
+      env_var = "JIRA_API_TOKEN_T049A_#{System.unique_integer([:positive])}"
+      previous = System.get_env(env_var)
+      System.put_env(env_var, "fake-jira-token-not-real")
+
+      on_exit(fn ->
+        case previous do
+          nil -> System.delete_env(env_var)
+          val -> System.put_env(env_var, val)
+        end
+      end)
+
+      workflow_root =
+        Path.join(
+          System.tmp_dir!(),
+          "symphony-elixir-jira-client-test-t049a-#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(workflow_root)
+      workflow_file = Path.join(workflow_root, "WORKFLOW.md")
+
+      File.write!(workflow_file, """
+      ---
+      tracker:
+        kind: "jira"
+        active_states: ["Todo", "In Progress"]
+        terminal_states: ["Closed", "Done"]
+        jira:
+          base_url: "https://jira.test"
+          email: "dev@example.com"
+          api_token: "$#{env_var}"
+          jql: "project = ENG"
+      polling:
+        interval_ms: 30000
+      ---
+      You are an agent for this repository.
+      """)
+
+      SymphonyElixir.Workflow.set_workflow_file_path(workflow_file)
+
+      if Process.whereis(SymphonyElixir.WorkflowStore) do
+        try do
+          SymphonyElixir.WorkflowStore.force_reload()
+        catch
+          :exit, _ -> :ok
+        end
+      end
+
+      on_exit(fn ->
+        Application.delete_env(:symphony_elixir, :workflow_file_path)
+        File.rm_rf(workflow_root)
+      end)
+
+      fake_403 = fn :get, _url, _headers, _body ->
+        {:ok, %{status: 403, body: ~s({"errorMessages":["Forbidden"]})}}
+      end
+
+      assert {:error, {:tracker_forbidden, %{project_key: "ENG"}}} =
+               result = Client.fetch_candidate_issues(request_fun: fake_403)
+
+      refute inspect(result) =~ "fake-jira-token-not-real"
+      refute inspect(result) =~ "Basic "
+    end
+
+    test "multi-project JQL — error carries the FIRST extracted project_key; string-literal keys ignored" do
+      env_var = "JIRA_API_TOKEN_T049B_#{System.unique_integer([:positive])}"
+      previous = System.get_env(env_var)
+      System.put_env(env_var, "fake-jira-token-not-real")
+
+      on_exit(fn ->
+        case previous do
+          nil -> System.delete_env(env_var)
+          val -> System.put_env(env_var, val)
+        end
+      end)
+
+      workflow_root =
+        Path.join(
+          System.tmp_dir!(),
+          "symphony-elixir-jira-client-test-t049b-#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(workflow_root)
+      workflow_file = Path.join(workflow_root, "WORKFLOW.md")
+
+      # `summary ~ "PROJ"` is a string literal — Config.extract_project_keys/1
+      # must NOT yield PROJ. Declaration order is ACME, then ENG — first key
+      # is ACME.
+      File.write!(workflow_file, """
+      ---
+      tracker:
+        kind: "jira"
+        active_states: ["Todo", "In Progress"]
+        terminal_states: ["Closed", "Done"]
+        jira:
+          base_url: "https://jira.test"
+          email: "dev@example.com"
+          api_token: "$#{env_var}"
+          jql: "project = ACME OR project = ENG OR summary ~ \\"PROJ\\""
+      polling:
+        interval_ms: 30000
+      ---
+      You are an agent for this repository.
+      """)
+
+      SymphonyElixir.Workflow.set_workflow_file_path(workflow_file)
+
+      if Process.whereis(SymphonyElixir.WorkflowStore) do
+        try do
+          SymphonyElixir.WorkflowStore.force_reload()
+        catch
+          :exit, _ -> :ok
+        end
+      end
+
+      on_exit(fn ->
+        Application.delete_env(:symphony_elixir, :workflow_file_path)
+        File.rm_rf(workflow_root)
+      end)
+
+      fake_403 = fn :get, _url, _headers, _body ->
+        {:ok, %{status: 403, body: ~s({"errorMessages":["Forbidden"]})}}
+      end
+
+      assert {:error, {:tracker_forbidden, %{project_key: "ACME"}}} =
+               Client.fetch_candidate_issues(request_fun: fake_403)
+    end
+  end
 end
