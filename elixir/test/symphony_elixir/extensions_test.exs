@@ -9,6 +9,33 @@ defmodule SymphonyElixir.ExtensionsTest do
 
   @endpoint SymphonyElixirWeb.Endpoint
 
+  defmodule FakeJiraClient do
+    def fetch_candidate_issues do
+      send(self(), :fake_jira_fetch_candidate_issues_called)
+      {:ok, [%SymphonyElixir.Tracker.Issue{id: "10001", identifier: "ENG-1"}]}
+    end
+
+    def fetch_issues_by_states(states) do
+      send(self(), {:fake_jira_fetch_issues_by_states_called, states})
+      {:ok, []}
+    end
+
+    def fetch_issue_states_by_ids(ids) do
+      send(self(), {:fake_jira_fetch_issue_states_by_ids_called, ids})
+      {:ok, []}
+    end
+
+    def create_comment(issue_id, body) do
+      send(self(), {:fake_jira_create_comment_called, issue_id, body})
+      :ok
+    end
+
+    def update_issue_state(issue_id, state) do
+      send(self(), {:fake_jira_update_issue_state_called, issue_id, state})
+      :ok
+    end
+  end
+
   defmodule FakeLinearClient do
     def fetch_candidate_issues do
       send(self(), :fetch_candidate_issues_called)
@@ -79,12 +106,19 @@ defmodule SymphonyElixir.ExtensionsTest do
 
   setup do
     linear_client_module = Application.get_env(:symphony_elixir, :linear_client_module)
+    jira_client_module = Application.get_env(:symphony_elixir, :jira_client_module)
 
     on_exit(fn ->
       if is_nil(linear_client_module) do
         Application.delete_env(:symphony_elixir, :linear_client_module)
       else
         Application.put_env(:symphony_elixir, :linear_client_module, linear_client_module)
+      end
+
+      if is_nil(jira_client_module) do
+        Application.delete_env(:symphony_elixir, :jira_client_module)
+      else
+        Application.put_env(:symphony_elixir, :jira_client_module, jira_client_module)
       end
     end)
 
@@ -217,6 +251,15 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert SymphonyElixir.Tracker.adapter() == Adapter
     assert {:ok, []} = SymphonyElixir.Tracker.validate_state_resolvability()
+  end
+
+  test "Jira.Adapter delegates fetch_candidate_issues/0 to the :jira_client_module Application env" do
+    Application.put_env(:symphony_elixir, :jira_client_module, FakeJiraClient)
+
+    assert {:ok, [%Issue{identifier: "ENG-1"}]} =
+             SymphonyElixir.Jira.Adapter.fetch_candidate_issues()
+
+    assert_receive :fake_jira_fetch_candidate_issues_called
   end
 
   test "linear adapter delegates reads and validates mutation responses" do
