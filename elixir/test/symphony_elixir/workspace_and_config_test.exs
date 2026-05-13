@@ -1482,7 +1482,12 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       System.put_env(env_var, "fake-jira-token-not-real")
 
       previous_client = Application.get_env(:symphony_elixir, :jira_client_module)
-      Application.put_env(:symphony_elixir, :jira_client_module, SymphonyElixir.WorkspaceAndConfigTest.FakeJiraClientResolvable)
+
+      Application.put_env(
+        :symphony_elixir,
+        :jira_client_module,
+        SymphonyElixir.WorkspaceAndConfigTest.FakeJiraClientResolvable
+      )
 
       on_exit(fn ->
         restore_env(env_var, previous)
@@ -1574,7 +1579,12 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       System.put_env(env_var, "fake-jira-token-not-real")
 
       previous_client = Application.get_env(:symphony_elixir, :jira_client_module)
-      Application.put_env(:symphony_elixir, :jira_client_module, SymphonyElixir.WorkspaceAndConfigTest.FakeJiraClientResolvable)
+
+      Application.put_env(
+        :symphony_elixir,
+        :jira_client_module,
+        SymphonyElixir.WorkspaceAndConfigTest.FakeJiraClientResolvable
+      )
 
       on_exit(fn ->
         restore_env(env_var, previous)

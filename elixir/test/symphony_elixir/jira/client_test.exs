@@ -345,7 +345,7 @@ defmodule SymphonyElixir.Jira.ClientTest do
       end
 
       assert {:ok, ["Code Review"]} =
-               SymphonyElixir.Jira.Client.validate_state_resolvability_for(
+               Client.validate_state_resolvability_for(
                  ["Todo", "in progress", "Code Review", "DONE", "Closed"],
                  request_fun: fake_request
                )
@@ -404,7 +404,7 @@ defmodule SymphonyElixir.Jira.ClientTest do
   end
 
   describe "fetch_candidate_issues/1 with operator priority_map (T046, US6, FR-016)" do
-    test "end-to-end: issue with fields.priority.name == \"P0\" and priority_map %{\"P0\" => 1} yields Issue.priority == 1" do
+    test "end-to-end: priority.name P0 with priority_map %{P0 => 1} yields Issue.priority 1" do
       env_var = "JIRA_API_TOKEN_T046_#{System.unique_integer([:positive])}"
       previous = System.get_env(env_var)
       System.put_env(env_var, "fake-jira-token-not-real")
@@ -863,30 +863,28 @@ defmodule SymphonyElixir.Jira.ClientTest do
       fake_request = fn :get, url, _headers, _body ->
         send(test_pid, {:jira_request, url})
 
-        cond do
-          String.contains?(url, "nextPageToken=abc") ->
-            # Page 2 — no nextPageToken; isLast=false MUST be ignored.
-            {:ok,
-             %{
-               status: 200,
-               body: %{
-                 "issues" => page2_issues,
-                 "isLast" => false
-               }
-             }}
-
-          true ->
-            # Page 1 — issues + nextPageToken; isLast=true MUST be ignored
-            # (we follow the token regardless).
-            {:ok,
-             %{
-               status: 200,
-               body: %{
-                 "issues" => page1_issues,
-                 "nextPageToken" => "abc",
-                 "isLast" => true
-               }
-             }}
+        if String.contains?(url, "nextPageToken=abc") do
+          # Page 2 — no nextPageToken; isLast=false MUST be ignored.
+          {:ok,
+           %{
+             status: 200,
+             body: %{
+               "issues" => page2_issues,
+               "isLast" => false
+             }
+           }}
+        else
+          # Page 1 — issues + nextPageToken; isLast=true MUST be ignored
+          # (we follow the token regardless).
+          {:ok,
+           %{
+             status: 200,
+             body: %{
+               "issues" => page1_issues,
+               "nextPageToken" => "abc",
+               "isLast" => true
+             }
+           }}
         end
       end
 
@@ -1499,7 +1497,7 @@ defmodule SymphonyElixir.Jira.ClientTest do
       assert url == "https://jira.test/rest/api/3/issue/ENG-42/transitions"
     end
 
-    test "execute_transition/2 POSTs body {\"transition\": {\"id\": <id>}}; 204 -> :ok" do
+    test ~s(execute_transition/2 POSTs body {"transition": {"id": <id>}}; 204 -> :ok) do
       test_pid = self()
 
       fake_request = fn method, url, headers, body ->

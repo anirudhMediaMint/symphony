@@ -126,20 +126,28 @@ defmodule SymphonyElixir.Config do
         {:error, {:unsupported_tracker_kind, settings.tracker.kind}}
 
       settings.tracker.kind == "linear" ->
-        with :ok <- validate_linear_flat_nested_keys(settings.tracker),
-             :ok <- validate_linear_required_fields(settings.tracker) do
-          :ok
-        end
+        validate_linear_semantics(settings.tracker)
 
       settings.tracker.kind == "jira" ->
-        with :ok <- validate_jira_base_url(settings.tracker.jira),
-             :ok <- validate_jira_required_fields(settings.tracker.jira),
-             :ok <- validate_jira_poll_interval(settings.tracker.jira, settings.polling) do
-          validate_jira_workflow_state_resolvability()
-        end
+        validate_jira_semantics(settings.tracker.jira, settings.polling)
 
       true ->
         :ok
+    end
+  end
+
+  defp validate_linear_semantics(tracker) do
+    with :ok <- validate_linear_flat_nested_keys(tracker),
+         :ok <- validate_linear_required_fields(tracker) do
+      :ok
+    end
+  end
+
+  defp validate_jira_semantics(jira, polling) do
+    with :ok <- validate_jira_base_url(jira),
+         :ok <- validate_jira_required_fields(jira),
+         :ok <- validate_jira_poll_interval(jira, polling) do
+      validate_jira_workflow_state_resolvability()
     end
   end
 
@@ -260,22 +268,19 @@ defmodule SymphonyElixir.Config do
 
   # FR-033: required `tracker.jira.*` fields. Checked in declaration order
   # so the first missing field surfaces — operators fix one error at a time.
+  @jira_required_fields [
+    {:base_url, :"tracker.jira.base_url"},
+    {:email, :"tracker.jira.email"},
+    {:api_token, :"tracker.jira.api_token"},
+    {:jql, :"tracker.jira.jql"}
+  ]
+
   defp validate_jira_required_fields(jira) do
-    cond do
-      not present?(jira && jira.base_url) ->
-        {:error, {:missing_tracker_config, :"tracker.jira.base_url"}}
-
-      not present?(jira && jira.email) ->
-        {:error, {:missing_tracker_config, :"tracker.jira.email"}}
-
-      not present?(jira && jira.api_token) ->
-        {:error, {:missing_tracker_config, :"tracker.jira.api_token"}}
-
-      not present?(jira && jira.jql) ->
-        {:error, {:missing_tracker_config, :"tracker.jira.jql"}}
-
-      true ->
-        validate_jql_no_order_by(jira.jql)
+    case Enum.find(@jira_required_fields, fn {field, _label} ->
+           not present?(jira && Map.get(jira, field))
+         end) do
+      {_field, label} -> {:error, {:missing_tracker_config, label}}
+      nil -> validate_jql_no_order_by(jira.jql)
     end
   end
 
@@ -383,19 +388,23 @@ defmodule SymphonyElixir.Config do
       <<n, o, t, ws, more::binary>>
       when n in [?N, ?n] and o in [?O, ?o] and t in [?T, ?t] and
              ws in [?\s, ?\t, ?\n, ?\r] ->
-        rest_after_not = skip_ws(<<ws, more::binary>>)
-
-        case rest_after_not do
-          <<i, n2, ws2, in_more::binary>>
-          when i in [?I, ?i] and n2 in [?N, ?n] and ws2 in [?\s, ?\t, ?\n, ?\r] ->
-            extract_in_list(<<ws2, in_more::binary>>, acc)
-
-          _ ->
-            {acc, rest}
-        end
+        parse_not_in_predicate(<<ws, more::binary>>, rest, acc)
 
       _ ->
         {acc, rest}
+    end
+  end
+
+  # Sub-case for `NOT IN (...)` after the leading `NOT` token has been matched.
+  # Returns `{acc, original_rest}` unchanged when the trailing `IN` is missing.
+  defp parse_not_in_predicate(after_not_raw, original_rest, acc) do
+    case skip_ws(after_not_raw) do
+      <<i, n2, ws2, in_more::binary>>
+      when i in [?I, ?i] and n2 in [?N, ?n] and ws2 in [?\s, ?\t, ?\n, ?\r] ->
+        extract_in_list(<<ws2, in_more::binary>>, acc)
+
+      _ ->
+        {acc, original_rest}
     end
   end
 

@@ -836,23 +836,25 @@ defmodule SymphonyElixir.Jira.Client do
   # Renders a children list using the provided block-sibling separator. Inline
   # nodes always join with empty string regardless of this separator.
   defp render_children(nodes, depth, pdict_key, block_sep) when is_list(nodes) do
-    nodes
-    |> Enum.map(&render_node(&1, depth, pdict_key))
-    |> Enum.reduce({[], nil}, fn current, {acc, prev_kind} ->
-      kind = current.kind
-      text = current.text
+    {acc, _kind} =
+      nodes
+      |> Enum.map(&render_node(&1, depth, pdict_key))
+      |> Enum.reduce({[], nil}, fn current, {acc, prev_kind} ->
+        kind = current.kind
+        text = current.text
 
-      sep =
-        case {prev_kind, kind} do
-          {nil, _} -> ""
-          {:block, _} -> block_sep
-          {_, :block} -> block_sep
-          _ -> ""
-        end
+        sep =
+          case {prev_kind, kind} do
+            {nil, _} -> ""
+            {:block, _} -> block_sep
+            {_, :block} -> block_sep
+            _ -> ""
+          end
 
-      {[text, sep | acc], kind}
-    end)
-    |> (fn {acc, _kind} -> acc |> Enum.reverse() |> IO.iodata_to_binary() end).()
+        {[text, sep | acc], kind}
+      end)
+
+    acc |> Enum.reverse() |> IO.iodata_to_binary()
   end
 
   defp render_children(_nodes, _depth, _pdict_key, _block_sep), do: ""
