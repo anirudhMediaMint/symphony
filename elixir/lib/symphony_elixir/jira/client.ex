@@ -230,21 +230,53 @@ defmodule SymphonyElixir.Jira.Client do
   def update_issue_state(_issue_key, _state_name), do: {:error, :not_implemented}
 
   defp do_fetch_candidate_issues(jira, request_fun) do
-    url = build_search_url(jira.base_url, jira.jql, jira.max_issues_per_poll)
+    cap = effective_cap(jira.max_issues_per_poll)
+    fetch_pages_loop(jira, request_fun, nil, [], cap)
+  end
+
+  # FR-010 + FR-011 (research.md R-4): paginate `/rest/api/3/search/jql` via
+  # `nextPageToken` query parameter (omitted on first request, included on
+  # follow-ups). `isLast` is ignored — only `nextPageToken` absence terminates
+  # the loop. Cap is enforced AFTER decoding each page (post-decode cap): we
+  # accumulate, truncate to `cap`, and on overflow emit a single
+  # `[:symphony, :tracker, :poll_cap_hit]` telemetry event + a single WARN log
+  # naming the cap, threshold, and JQL (truncated to 200 chars).
+  defp fetch_pages_loop(jira, request_fun, token, acc, cap) do
+    url = build_search_url(jira.base_url, jira.jql, jira.max_issues_per_poll, token)
     headers = build_request_headers(jira.email, jira.api_token)
 
     case request_fun.(:get, url, headers, nil) do
-      {:ok, %{status: 200, body: %{"issues" => issues}} = response} when is_list(issues) ->
+      {:ok, %{status: 200, body: %{"issues" => issues} = body} = response}
+      when is_list(issues) ->
         log_request_success(:get, url, response.status)
 
         normalized =
           issues
           |> Enum.map(
-            &normalize_issue(&1, jira.base_url, jira.priority_map || %{}, jira.description_format || "text")
+            &normalize_issue(
+              &1,
+              jira.base_url,
+              jira.priority_map || %{},
+              jira.description_format || "text"
+            )
           )
           |> Enum.reject(&is_nil/1)
 
-        {:ok, normalized}
+        merged = acc ++ normalized
+        next_token = Map.get(body, "nextPageToken")
+
+        cond do
+          length(merged) >= cap ->
+            truncated = Enum.take(merged, cap)
+            emit_poll_cap_hit(jira.jql, cap)
+            {:ok, truncated}
+
+          is_binary(next_token) and next_token != "" ->
+            fetch_pages_loop(jira, request_fun, next_token, merged, cap)
+
+          true ->
+            {:ok, merged}
+        end
 
       {:ok, response} ->
         classify_error_response(response, url, jira.jql)
@@ -254,6 +286,26 @@ defmodule SymphonyElixir.Jira.Client do
         {:error, {:jira_api_request, reason}}
     end
   end
+
+  defp effective_cap(value) when is_integer(value) and value > 0, do: value
+  defp effective_cap(_value), do: 200
+
+  defp emit_poll_cap_hit(jql, cap) do
+    excerpt = jql_excerpt(jql)
+
+    :telemetry.execute(
+      [:symphony, :tracker, :poll_cap_hit],
+      %{count: 1},
+      %{tracker_kind: :jira}
+    )
+
+    Logger.warning(
+      ~s(poll_cap_hit: tracker_kind=jira cap=#{cap} threshold=#{cap} jql="#{excerpt}")
+    )
+  end
+
+  defp jql_excerpt(jql) when is_binary(jql), do: String.slice(jql, 0, 200)
+  defp jql_excerpt(_jql), do: ""
 
   # FR-044: REST success-path logs MUST be DEBUG level — method, path (no
   # credential-bearing query string), status. Headers MUST NOT be logged.
@@ -341,12 +393,21 @@ defmodule SymphonyElixir.Jira.Client do
 
   defp search_jql_path?(_url), do: false
 
-  defp build_search_url(base_url, jql, max_issues_per_poll) do
+  defp build_search_url(base_url, jql, max_issues_per_poll, next_page_token \\ nil) do
     max_results = jira_max_results(max_issues_per_poll)
 
-    String.trim_trailing(base_url, "/") <>
-      "/rest/api/3/search/jql?jql=" <> URI.encode_www_form(jql) <>
-      "&maxResults=" <> Integer.to_string(max_results)
+    base =
+      String.trim_trailing(base_url, "/") <>
+        "/rest/api/3/search/jql?jql=" <> URI.encode_www_form(jql) <>
+        "&maxResults=" <> Integer.to_string(max_results)
+
+    case next_page_token do
+      token when is_binary(token) and token != "" ->
+        base <> "&nextPageToken=" <> URI.encode_www_form(token)
+
+      _ ->
+        base
+    end
   end
 
   defp jira_max_results(value) when is_integer(value) and value > 0, do: min(value, 100)
