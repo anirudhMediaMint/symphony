@@ -1239,6 +1239,473 @@ defmodule SymphonyElixir.Jira.ClientTest do
     end
   end
 
+  describe "extract_blocked_by_for_test/1 (T062, FR-017)" do
+    test "returns [] when fields.issuelinks is absent or empty" do
+      assert Client.extract_blocked_by_for_test(%{"fields" => %{}}) == []
+      assert Client.extract_blocked_by_for_test(%{"fields" => %{"issuelinks" => []}}) == []
+      assert Client.extract_blocked_by_for_test(%{}) == []
+    end
+
+    test "yields blocker refs only for type.name=='Blocks' with type.inward=='is blocked by' AND inwardIssue populated" do
+      payload = %{
+        "fields" => %{
+          "issuelinks" => [
+            # Inward "is blocked by" Blocks — INCLUDE
+            %{
+              "type" => %{"name" => "Blocks", "inward" => "is blocked by", "outward" => "blocks"},
+              "inwardIssue" => %{
+                "id" => "20001",
+                "key" => "ENG-100",
+                "fields" => %{"status" => %{"name" => "Open"}}
+              }
+            },
+            # Outward "blocks" — SKIP (we only follow inward "is blocked by")
+            %{
+              "type" => %{"name" => "Blocks", "inward" => "is blocked by", "outward" => "blocks"},
+              "outwardIssue" => %{
+                "id" => "20002",
+                "key" => "ENG-101",
+                "fields" => %{"status" => %{"name" => "Done"}}
+              }
+            },
+            # Different link type (Relates) — SKIP
+            %{
+              "type" => %{"name" => "Relates", "inward" => "relates to", "outward" => "relates to"},
+              "inwardIssue" => %{
+                "id" => "20003",
+                "key" => "ENG-102",
+                "fields" => %{"status" => %{"name" => "Open"}}
+              }
+            },
+            # Blocks but wrong inward phrasing — SKIP
+            %{
+              "type" => %{"name" => "Blocks", "inward" => "blocked by", "outward" => "blocks"},
+              "inwardIssue" => %{
+                "id" => "20004",
+                "key" => "ENG-103",
+                "fields" => %{"status" => %{"name" => "Open"}}
+              }
+            },
+            # Inward populated but it's a different type — SKIP
+            %{
+              "type" => %{"name" => "Duplicate", "inward" => "is duplicated by"},
+              "inwardIssue" => %{
+                "id" => "20005",
+                "key" => "ENG-104",
+                "fields" => %{"status" => %{"name" => "Open"}}
+              }
+            }
+          ]
+        }
+      }
+
+      assert [blocker] = Client.extract_blocked_by_for_test(payload)
+      assert blocker == %{id: "20001", key: "ENG-100", status: "Open"}
+    end
+
+    test "yields multiple blockers in declared order, preserving status name" do
+      payload = %{
+        "fields" => %{
+          "issuelinks" => [
+            %{
+              "type" => %{"name" => "Blocks", "inward" => "is blocked by"},
+              "inwardIssue" => %{
+                "id" => "1",
+                "key" => "ENG-1",
+                "fields" => %{"status" => %{"name" => "Open"}}
+              }
+            },
+            %{
+              "type" => %{"name" => "Blocks", "inward" => "is blocked by"},
+              "inwardIssue" => %{
+                "id" => "2",
+                "key" => "ENG-2",
+                "fields" => %{"status" => %{"name" => "In Progress"}}
+              }
+            }
+          ]
+        }
+      }
+
+      assert [
+               %{id: "1", key: "ENG-1", status: "Open"},
+               %{id: "2", key: "ENG-2", status: "In Progress"}
+             ] = Client.extract_blocked_by_for_test(payload)
+    end
+
+    test "tolerates missing inwardIssue.fields.status (status :: nil)" do
+      payload = %{
+        "fields" => %{
+          "issuelinks" => [
+            %{
+              "type" => %{"name" => "Blocks", "inward" => "is blocked by"},
+              "inwardIssue" => %{"id" => "9", "key" => "ENG-9"}
+            }
+          ]
+        }
+      }
+
+      assert [%{id: "9", key: "ENG-9", status: nil}] =
+               Client.extract_blocked_by_for_test(payload)
+    end
+  end
+
+  describe "normalize_issue_for_test/2 wiring of blocked_by (T063, FR-017)" do
+    test "normalize_issue populates blocked_by from issuelinks" do
+      payload = %{
+        "id" => "1",
+        "key" => "ENG-1",
+        "fields" => %{
+          "issuelinks" => [
+            %{
+              "type" => %{"name" => "Blocks", "inward" => "is blocked by"},
+              "inwardIssue" => %{
+                "id" => "99",
+                "key" => "ENG-99",
+                "fields" => %{"status" => %{"name" => "Open"}}
+              }
+            }
+          ]
+        }
+      }
+
+      issue = Client.normalize_issue_for_test(payload, base_url: "https://jira.test")
+      assert issue.blocked_by == [%{id: "99", key: "ENG-99", status: "Open"}]
+    end
+  end
+
+  describe "create_comment/2 ADF wrapping (T064, FR-024)" do
+    test "POSTs to /rest/api/3/issue/{key}/comment with body wrapped in ADF doc/paragraph/text" do
+      test_pid = self()
+
+      fake_request = fn method, url, headers, body ->
+        send(test_pid, {:jira_request, method, url, headers, body})
+        {:ok, %{status: 201, body: %{"id" => "10100"}}}
+      end
+
+      assert :ok =
+               Client.create_comment("ENG-42", "Hello comment",
+                 request_fun: fake_request,
+                 base_url: "https://jira.test",
+                 email: "dev@example.com",
+                 api_token: "fake-jira-token-not-real"
+               )
+
+      assert_receive {:jira_request, :post, url, headers, body}
+      assert url == "https://jira.test/rest/api/3/issue/ENG-42/comment"
+
+      assert %{
+               "body" => %{
+                 "version" => 1,
+                 "type" => "doc",
+                 "content" => [
+                   %{"type" => "paragraph", "content" => [%{"type" => "text", "text" => "Hello comment"}]}
+                 ]
+               }
+             } = body
+
+      assert Enum.any?(headers, fn
+               {"Authorization", _} -> true
+               _ -> false
+             end)
+    end
+
+    test "non-2xx response maps via the error-atom dispatch" do
+      fake_request = fn :post, _url, _headers, _body ->
+        {:ok, %{status: 401, body: ~s({"errorMessages":["nope"]})}}
+      end
+
+      assert {:error, :tracker_unauthorized} =
+               Client.create_comment("ENG-42", "x",
+                 request_fun: fake_request,
+                 base_url: "https://jira.test",
+                 email: "dev@example.com",
+                 api_token: "fake-jira-token-not-real"
+               )
+    end
+  end
+
+  describe "find_transition/2 + execute_transition/2 (T064, FR-025)" do
+    test "zero match yields :state_transition_not_available" do
+      fake_request = fn :get, _url, _headers, _body ->
+        {:ok,
+         %{
+           status: 200,
+           body: %{
+             "transitions" => [
+               %{"id" => "11", "to" => %{"name" => "In Progress"}}
+             ]
+           }
+         }}
+      end
+
+      assert {:error, :state_transition_not_available} =
+               Client.find_transition("ENG-42", "Code Review",
+                 request_fun: fake_request,
+                 base_url: "https://jira.test",
+                 email: "dev@example.com",
+                 api_token: "fake-jira-token-not-real"
+               )
+    end
+
+    test "multi-match (case-insensitive on to.name) yields :state_transition_ambiguous" do
+      fake_request = fn :get, _url, _headers, _body ->
+        {:ok,
+         %{
+           status: 200,
+           body: %{
+             "transitions" => [
+               %{"id" => "11", "to" => %{"name" => "Done"}},
+               %{"id" => "12", "to" => %{"name" => "done"}}
+             ]
+           }
+         }}
+      end
+
+      assert {:error, :state_transition_ambiguous} =
+               Client.find_transition("ENG-42", "Done",
+                 request_fun: fake_request,
+                 base_url: "https://jira.test",
+                 email: "dev@example.com",
+                 api_token: "fake-jira-token-not-real"
+               )
+    end
+
+    test "single match yields {:ok, transition_id}, case-insensitive" do
+      fake_request = fn :get, url, _headers, _body ->
+        send(self(), {:transitions_url, url})
+
+        {:ok,
+         %{
+           status: 200,
+           body: %{
+             "transitions" => [
+               %{"id" => "11", "to" => %{"name" => "In Progress"}},
+               %{"id" => "31", "to" => %{"name" => "Done"}}
+             ]
+           }
+         }}
+      end
+
+      assert {:ok, "31"} =
+               Client.find_transition("ENG-42", "done",
+                 request_fun: fake_request,
+                 base_url: "https://jira.test",
+                 email: "dev@example.com",
+                 api_token: "fake-jira-token-not-real"
+               )
+
+      assert_received {:transitions_url, url}
+      assert url == "https://jira.test/rest/api/3/issue/ENG-42/transitions"
+    end
+
+    test "execute_transition/2 POSTs body {\"transition\": {\"id\": <id>}}; 204 -> :ok" do
+      test_pid = self()
+
+      fake_request = fn method, url, headers, body ->
+        send(test_pid, {:exec_request, method, url, headers, body})
+        {:ok, %{status: 204, body: ""}}
+      end
+
+      assert :ok =
+               Client.execute_transition("ENG-42", "31",
+                 request_fun: fake_request,
+                 base_url: "https://jira.test",
+                 email: "dev@example.com",
+                 api_token: "fake-jira-token-not-real"
+               )
+
+      assert_receive {:exec_request, :post, url, _headers, body}
+      assert url == "https://jira.test/rest/api/3/issue/ENG-42/transitions"
+      assert body == %{"transition" => %{"id" => "31"}}
+    end
+  end
+
+  describe "fetch_candidate_issues/1 redirect rejection (T066, FR-009, NFR-SEC-003, AC-012)" do
+    setup do
+      env_var = "JIRA_API_TOKEN_T066_#{System.unique_integer([:positive])}"
+      previous = System.get_env(env_var)
+      System.put_env(env_var, "fake-jira-token-not-real")
+
+      workflow_root =
+        Path.join(
+          System.tmp_dir!(),
+          "symphony-elixir-jira-client-test-t066-#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(workflow_root)
+      workflow_file = Path.join(workflow_root, "WORKFLOW.md")
+
+      File.write!(workflow_file, """
+      ---
+      tracker:
+        kind: "jira"
+        active_states: ["Todo", "In Progress"]
+        terminal_states: ["Closed", "Done"]
+        jira:
+          base_url: "https://jira.test"
+          email: "dev@example.com"
+          api_token: "$#{env_var}"
+          jql: "project = ENG"
+      polling:
+        interval_ms: 30000
+      ---
+      You are an agent for this repository.
+      """)
+
+      SymphonyElixir.Workflow.set_workflow_file_path(workflow_file)
+
+      if Process.whereis(SymphonyElixir.WorkflowStore) do
+        try do
+          SymphonyElixir.WorkflowStore.force_reload()
+        catch
+          :exit, _ -> :ok
+        end
+      end
+
+      on_exit(fn ->
+        case previous do
+          nil -> System.delete_env(env_var)
+          val -> System.put_env(env_var, val)
+        end
+
+        Application.delete_env(:symphony_elixir, :workflow_file_path)
+        File.rm_rf(workflow_root)
+      end)
+
+      :ok
+    end
+
+    test "302 same-host returns {:error, {:jira_unexpected_redirect, 302}} and does not re-send" do
+      test_pid = self()
+
+      fake_302 = fn :get, url, _headers, _body ->
+        send(test_pid, {:redirect_called, url})
+        {:ok, %{status: 302, body: "", headers: [{"location", "https://jira.test/elsewhere"}]}}
+      end
+
+      assert {:error, {:jira_unexpected_redirect, 302}} =
+               Client.fetch_candidate_issues(request_fun: fake_302)
+
+      # Only ONE request should have been made — no re-follow.
+      assert_received {:redirect_called, _}
+      refute_received {:redirect_called, _}
+    end
+
+    test "302 cross-host returns {:error, {:jira_unexpected_redirect, 302}} and does not re-send Authorization" do
+      test_pid = self()
+
+      fake_302 = fn :get, url, headers, _body ->
+        send(test_pid, {:redirect_called, url, headers})
+        {:ok, %{status: 302, body: "", headers: [{"location", "https://evil.example.com/leak"}]}}
+      end
+
+      assert {:error, {:jira_unexpected_redirect, 302}} =
+               Client.fetch_candidate_issues(request_fun: fake_302)
+
+      # First (and ONLY) call carried Authorization to jira.test only.
+      assert_received {:redirect_called, url, _headers}
+      assert String.starts_with?(url, "https://jira.test/")
+
+      # No second call — Authorization MUST NOT be re-sent to the redirect target.
+      refute_received {:redirect_called, _, _}
+    end
+  end
+
+  describe "fetch_candidate_issues/1 exhaustive error mapping (T067, FR-040)" do
+    setup do
+      env_var = "JIRA_API_TOKEN_T067_#{System.unique_integer([:positive])}"
+      previous = System.get_env(env_var)
+      System.put_env(env_var, "fake-jira-token-not-real")
+
+      workflow_root =
+        Path.join(
+          System.tmp_dir!(),
+          "symphony-elixir-jira-client-test-t067-#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(workflow_root)
+      workflow_file = Path.join(workflow_root, "WORKFLOW.md")
+
+      File.write!(workflow_file, """
+      ---
+      tracker:
+        kind: "jira"
+        active_states: ["Todo", "In Progress"]
+        terminal_states: ["Closed", "Done"]
+        jira:
+          base_url: "https://jira.test"
+          email: "dev@example.com"
+          api_token: "$#{env_var}"
+          jql: "project = ENG"
+      polling:
+        interval_ms: 30000
+      ---
+      You are an agent for this repository.
+      """)
+
+      SymphonyElixir.Workflow.set_workflow_file_path(workflow_file)
+
+      if Process.whereis(SymphonyElixir.WorkflowStore) do
+        try do
+          SymphonyElixir.WorkflowStore.force_reload()
+        catch
+          :exit, _ -> :ok
+        end
+      end
+
+      on_exit(fn ->
+        case previous do
+          nil -> System.delete_env(env_var)
+          val -> System.put_env(env_var, val)
+        end
+
+        Application.delete_env(:symphony_elixir, :workflow_file_path)
+        File.rm_rf(workflow_root)
+      end)
+
+      :ok
+    end
+
+    test "non-2xx status codes 404/422/429/500/502/503 map to {:jira_api_status, code}" do
+      for status <- [404, 422, 429, 500, 502, 503] do
+        fake = fn :get, _url, _headers, _body ->
+          {:ok, %{status: status, body: ~s({"errorMessages":["boom"]})}}
+        end
+
+        assert {:error, {:jira_api_status, ^status}} =
+                 Client.fetch_candidate_issues(request_fun: fake)
+      end
+    end
+
+    test "transport-level {:error, reason} maps to {:jira_api_request, reason}" do
+      fake = fn :get, _url, _headers, _body ->
+        {:error, :timeout}
+      end
+
+      assert {:error, {:jira_api_request, :timeout}} =
+               Client.fetch_candidate_issues(request_fun: fake)
+    end
+
+    test "200 with malformed body (missing issues key) maps to :jira_unknown_payload" do
+      fake = fn :get, _url, _headers, _body ->
+        {:ok, %{status: 200, body: %{"unexpected" => "shape"}}}
+      end
+
+      assert {:error, {:jira_unknown_payload, _excerpt}} =
+               Client.fetch_candidate_issues(request_fun: fake)
+    end
+
+    test "200 with non-map body maps to :jira_unknown_payload" do
+      fake = fn :get, _url, _headers, _body ->
+        {:ok, %{status: 200, body: "<<not json>>"}}
+      end
+
+      assert {:error, {:jira_unknown_payload, _excerpt}} =
+               Client.fetch_candidate_issues(request_fun: fake)
+    end
+  end
+
   describe "render_adf_for_test/1 URL-scheme filter (T058, FR-020, NFR-SEC-005, AC-010)" do
     test "http and https inlineCard/blockCard URLs pass through as <url>" do
       adf = %{
