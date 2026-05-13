@@ -34,6 +34,15 @@ defmodule SymphonyElixir.ExtensionsTest do
       send(self(), {:fake_jira_update_issue_state_called, issue_id, state})
       :ok
     end
+
+    def validate_state_resolvability_for(state_names) do
+      send(self(), {:fake_jira_validate_state_resolvability_for_called, state_names})
+
+      case Process.get({__MODULE__, :validate_state_resolvability_for}) do
+        fun when is_function(fun, 1) -> fun.(state_names)
+        _ -> {:ok, []}
+      end
+    end
   end
 
   defmodule FakeLinearClient do
@@ -295,6 +304,66 @@ defmodule SymphonyElixir.ExtensionsTest do
              SymphonyElixir.Jira.Adapter.fetch_candidate_issues()
 
     assert_receive :fake_jira_fetch_candidate_issues_called
+  end
+
+  test "T040 Jira.Adapter.validate_state_resolvability/0 collects active_states ++ terminal_states (Gate 2 FR-038 substitution), de-dupes, and delegates to the client" do
+    # Gate 2 substitution: FR-038 spec text references a transition-mapping
+    # config surface that does not exist in v1. The adapter's input scope is
+    # tracker.active_states ++ tracker.terminal_states.
+    env_var = "JIRA_API_TOKEN_T040_#{System.unique_integer([:positive])}"
+    previous = System.get_env(env_var)
+    System.put_env(env_var, "fake-jira-token-not-real")
+    on_exit(fn -> restore_env(env_var, previous) end)
+
+    write_workflow_file_jira_t040!(Workflow.workflow_file_path(), env_var)
+
+    Application.put_env(:symphony_elixir, :jira_client_module, FakeJiraClient)
+
+    Process.put(
+      {FakeJiraClient, :validate_state_resolvability_for},
+      fn names ->
+        # Echo back the input so the test can assert collection + de-dup.
+        {:ok, names}
+      end
+    )
+
+    assert {:ok, names} = SymphonyElixir.Jira.Adapter.validate_state_resolvability()
+
+    assert_receive {:fake_jira_validate_state_resolvability_for_called, received}
+
+    # Active + terminal concatenated, in declaration order, with duplicates
+    # removed (case-preserving — "Done" appearing in both lists shows up once).
+    assert received == ["Todo", "In Progress", "Done"]
+    assert names == ["Todo", "In Progress", "Done"]
+  end
+
+  defp write_workflow_file_jira_t040!(path, env_var) do
+    File.write!(path, """
+    ---
+    tracker:
+      kind: "jira"
+      active_states: ["Todo", "In Progress", "Done"]
+      terminal_states: ["Done", "In Progress"]
+      jira:
+        base_url: "https://jira.test"
+        email: "dev@example.com"
+        api_token: "$#{env_var}"
+        jql: "project = ENG"
+    polling:
+      interval_ms: 30000
+    ---
+    You are an agent for this repository.
+    """)
+
+    if Process.whereis(SymphonyElixir.WorkflowStore) do
+      try do
+        SymphonyElixir.WorkflowStore.force_reload()
+      catch
+        :exit, _ -> :ok
+      end
+    end
+
+    :ok
   end
 
   test "linear adapter delegates reads and validates mutation responses" do
