@@ -1367,12 +1367,98 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  describe "JQL ORDER BY literal-aware preflight (US3, T031, FR-035, AC-011)" do
+    setup do
+      env_var = "JIRA_API_TOKEN_US3_#{System.unique_integer([:positive])}"
+      previous = System.get_env(env_var)
+      System.put_env(env_var, "fake-jira-token-not-real")
+
+      on_exit(fn -> restore_env(env_var, previous) end)
+
+      {:ok, env_var: env_var}
+    end
+
+    test "(a) bare ORDER BY outside literal fails with jql_order_by_not_allowed", %{env_var: env_var} do
+      write_jira_workflow_file!(Workflow.workflow_file_path(),
+        base_url: "https://jira.test",
+        email: "dev@example.com",
+        api_token: "$#{env_var}",
+        jql_yaml: ~S('project = ENG ORDER BY priority')
+      )
+
+      assert {:error, {:jql_order_by_not_allowed, fragment}} = Config.validate!()
+      assert is_binary(fragment)
+      assert String.downcase(fragment) =~ "order"
+    end
+
+    test "(b) ORDER BY inside double-quoted JQL literal passes", %{env_var: env_var} do
+      write_jira_workflow_file!(Workflow.workflow_file_path(),
+        base_url: "https://jira.test",
+        email: "dev@example.com",
+        api_token: "$#{env_var}",
+        jql_yaml: ~S('summary ~ "ORDER BY docs"')
+      )
+
+      assert :ok = Config.validate!()
+    end
+
+    test "(c) ORDER BY inside single-quoted JQL literal passes", %{env_var: env_var} do
+      write_jira_workflow_file!(Workflow.workflow_file_path(),
+        base_url: "https://jira.test",
+        email: "dev@example.com",
+        api_token: "$#{env_var}",
+        jql_yaml: ~S("summary ~ 'ORDER BY docs'")
+      )
+
+      assert :ok = Config.validate!()
+    end
+
+    test "(d) ORDER BY after backslash-escaped quote in double-quoted literal is OUTSIDE the literal and fails",
+         %{env_var: env_var} do
+      # YAML single-quoted scalar passes through backslashes verbatim, so the
+      # resulting Elixir/JQL string is: summary ~ "escaped \" ORDER BY"
+      # In JQL, \" closes the literal (the scanner sees \\ followed by ", which
+      # is an escape pair inside the string), leaving ORDER BY... outside.
+      write_jira_workflow_file!(Workflow.workflow_file_path(),
+        base_url: "https://jira.test",
+        email: "dev@example.com",
+        api_token: "$#{env_var}",
+        jql_yaml: ~S('summary ~ "escaped \" ORDER BY"')
+      )
+
+      assert {:error, {:jql_order_by_not_allowed, _fragment}} = Config.validate!()
+    end
+
+    test "(e) case-insensitive and multi-space variants all caught", %{env_var: env_var} do
+      for jql_raw <- [
+            "project = ENG order by priority",
+            "project = ENG Order By priority",
+            "project = ENG ORDER  BY priority"
+          ] do
+        write_jira_workflow_file!(Workflow.workflow_file_path(),
+          base_url: "https://jira.test",
+          email: "dev@example.com",
+          api_token: "$#{env_var}",
+          jql_yaml: "'" <> jql_raw <> "'"
+        )
+
+        assert {:error, {:jql_order_by_not_allowed, _fragment}} = Config.validate!(),
+               "expected #{inspect(jql_raw)} to be rejected"
+      end
+    end
+  end
+
   defp write_jira_workflow_file!(path, opts) do
     base_url = Keyword.fetch!(opts, :base_url)
     email = Keyword.fetch!(opts, :email)
     api_token = Keyword.fetch!(opts, :api_token)
-    jql = Keyword.fetch!(opts, :jql)
     poll_interval_ms = Keyword.get(opts, :poll_interval_ms, 30_000)
+
+    jql_yaml_scalar =
+      case Keyword.fetch(opts, :jql_yaml) do
+        {:ok, raw} when is_binary(raw) -> raw
+        :error -> ~s("#{Keyword.fetch!(opts, :jql)}")
+      end
 
     workflow = """
     ---
@@ -1384,7 +1470,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
         base_url: "#{base_url}"
         email: "#{email}"
         api_token: "#{api_token}"
-        jql: "#{jql}"
+        jql: #{jql_yaml_scalar}
     polling:
       interval_ms: #{poll_interval_ms}
     ---
