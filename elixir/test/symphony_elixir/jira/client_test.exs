@@ -147,6 +147,80 @@ defmodule SymphonyElixir.Jira.ClientTest do
     end
   end
 
+  describe "fetch_candidate_issues/1 maps HTTP 400 to jira_invalid_jql (T032, US3, FR-040, FR-042)" do
+    test "returns {:error, {:jira_invalid_jql, body_excerpt}} and never leaks the token" do
+      env_var = "JIRA_API_TOKEN_T032_#{System.unique_integer([:positive])}"
+      previous = System.get_env(env_var)
+      System.put_env(env_var, "fake-jira-token-not-real")
+
+      on_exit(fn ->
+        case previous do
+          nil -> System.delete_env(env_var)
+          val -> System.put_env(env_var, val)
+        end
+      end)
+
+      workflow_root =
+        Path.join(
+          System.tmp_dir!(),
+          "symphony-elixir-jira-client-test-t032-#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(workflow_root)
+      workflow_file = Path.join(workflow_root, "WORKFLOW.md")
+
+      File.write!(workflow_file, """
+      ---
+      tracker:
+        kind: "jira"
+        active_states: ["Todo", "In Progress"]
+        terminal_states: ["Closed", "Done"]
+        jira:
+          base_url: "https://jira.test"
+          email: "dev@example.com"
+          api_token: "$#{env_var}"
+          jql: "project = ENG"
+      polling:
+        interval_ms: 30000
+      ---
+      You are an agent for this repository.
+      """)
+
+      SymphonyElixir.Workflow.set_workflow_file_path(workflow_file)
+
+      if Process.whereis(SymphonyElixir.WorkflowStore) do
+        try do
+          SymphonyElixir.WorkflowStore.force_reload()
+        catch
+          :exit, _ -> :ok
+        end
+      end
+
+      on_exit(fn ->
+        Application.delete_env(:symphony_elixir, :workflow_file_path)
+        File.rm_rf(workflow_root)
+      end)
+
+      fake_400 = fn :get, _url, _headers, _body ->
+        {:ok,
+         %{
+           status: 400,
+           body: ~s({"errorMessages":["Field 'priorityz' does not exist"]})
+         }}
+      end
+
+      assert {:error, {:jira_invalid_jql, body_excerpt}} =
+               result = Client.fetch_candidate_issues(request_fun: fake_400)
+
+      assert is_binary(body_excerpt)
+      assert body_excerpt =~ "priorityz"
+
+      # FR-042 / NFR-SEC-008 — token MUST NOT appear in the error tuple.
+      refute inspect(result) =~ "fake-jira-token-not-real"
+      refute inspect(result) =~ "Basic "
+    end
+  end
+
   describe "apply_priority_map_for_test/2 (T020, FR-016)" do
     test "default map maps Highest/High/Medium/Low/Lowest -> 1..5" do
       assert Client.apply_priority_map_for_test("Highest", %{}) == 1
