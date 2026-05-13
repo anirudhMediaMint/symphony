@@ -1348,6 +1348,114 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert Config.settings!().tracker.jira.api_token == "fake-jira-token-not-real"
     end
 
+    test "tracker.jira.description_format: \"adf\" causes normalization to pass raw ADF map into Issue.description (T060, FR-023)" do
+      env_var = "JIRA_API_TOKEN_T060_#{System.unique_integer([:positive])}"
+      previous = System.get_env(env_var)
+      System.put_env(env_var, "fake-jira-token-not-real")
+
+      on_exit(fn -> restore_env(env_var, previous) end)
+
+      write_jira_workflow_file!(Workflow.workflow_file_path(),
+        base_url: "https://jira.test",
+        email: "dev@example.com",
+        api_token: "$#{env_var}",
+        jql: "project = ENG",
+        description_format: "adf"
+      )
+
+      jira = Config.settings!().tracker.jira
+      assert jira.description_format == "adf"
+
+      raw_adf = %{
+        "type" => "doc",
+        "version" => 1,
+        "content" => [
+          %{"type" => "paragraph", "content" => [%{"type" => "text", "text" => "raw"}]}
+        ]
+      }
+
+      raw_fake = fn :get, _url, _headers, _body ->
+        {:ok,
+         %{
+           status: 200,
+           body: %{
+             "issues" => [
+               %{
+                 "id" => "1",
+                 "key" => "ENG-1",
+                 "fields" => %{
+                   "summary" => "x",
+                   "description" => raw_adf,
+                   "status" => %{"name" => "Todo"}
+                 }
+               }
+             ]
+           }
+         }}
+      end
+
+      assert {:ok, [issue]} =
+               SymphonyElixir.Jira.Client.fetch_candidate_issues(request_fun: raw_fake)
+
+      # FR-023: with description_format: "adf", the raw ADF map MUST pass
+      # through unchanged into the normalized Issue (typespec
+      # String.t() | map() | nil supports map).
+      assert is_map(issue.description)
+      assert issue.description == raw_adf
+    end
+
+    test "tracker.jira.description_format: \"text\" (default) renders ADF map to plain text in Issue.description (T060, FR-023)" do
+      env_var = "JIRA_API_TOKEN_T060_TEXT_#{System.unique_integer([:positive])}"
+      previous = System.get_env(env_var)
+      System.put_env(env_var, "fake-jira-token-not-real")
+
+      on_exit(fn -> restore_env(env_var, previous) end)
+
+      # No description_format key: defaults to "text".
+      write_jira_workflow_file!(Workflow.workflow_file_path(),
+        base_url: "https://jira.test",
+        email: "dev@example.com",
+        api_token: "$#{env_var}",
+        jql: "project = ENG"
+      )
+
+      jira = Config.settings!().tracker.jira
+      assert jira.description_format == "text"
+
+      adf = %{
+        "type" => "doc",
+        "version" => 1,
+        "content" => [
+          %{"type" => "paragraph", "content" => [%{"type" => "text", "text" => "rendered"}]}
+        ]
+      }
+
+      fake = fn :get, _url, _headers, _body ->
+        {:ok,
+         %{
+           status: 200,
+           body: %{
+             "issues" => [
+               %{
+                 "id" => "1",
+                 "key" => "ENG-1",
+                 "fields" => %{
+                   "summary" => "x",
+                   "description" => adf,
+                   "status" => %{"name" => "Todo"}
+                 }
+               }
+             ]
+           }
+         }}
+      end
+
+      assert {:ok, [issue]} =
+               SymphonyElixir.Jira.Client.fetch_candidate_issues(request_fun: fake)
+
+      assert issue.description == "rendered"
+    end
+
     test "preflight returns missing_tracker_config tracker.jira.api_token when token is empty after $-resolution (FR-033)" do
       env_var = "JIRA_API_TOKEN_MISSING_#{System.unique_integer([:positive])}"
       previous = System.get_env(env_var)
@@ -1625,6 +1733,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     allow_aggressive_polling = Keyword.get(opts, :allow_aggressive_polling, false)
     active_states = Keyword.get(opts, :active_states, ["Todo", "In Progress"])
     terminal_states = Keyword.get(opts, :terminal_states, ["Closed", "Done"])
+    description_format = Keyword.get(opts, :description_format)
 
     jql_yaml_scalar =
       case Keyword.fetch(opts, :jql_yaml) do
@@ -1635,6 +1744,12 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     states_yaml = fn list ->
       "[" <> Enum.map_join(list, ", ", fn s -> "\"" <> s <> "\"" end) <> "]"
     end
+
+    description_format_line =
+      case description_format do
+        nil -> ""
+        format when is_binary(format) -> "    description_format: \"#{format}\""
+      end
 
     workflow = """
     ---
@@ -1648,6 +1763,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
         api_token: "#{api_token}"
         jql: #{jql_yaml_scalar}
         allow_aggressive_polling: #{allow_aggressive_polling}
+    #{description_format_line}
     polling:
       interval_ms: #{poll_interval_ms}
     ---
