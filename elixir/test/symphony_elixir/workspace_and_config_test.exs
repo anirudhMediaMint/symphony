@@ -1496,12 +1496,115 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  defmodule FakeJiraClientResolvable do
+    @moduledoc false
+    # Configurable fake. Tests put a function under
+    # {__MODULE__, :validate_state_resolvability_for} in the process dictionary
+    # before invoking Config.validate!/0; the adapter delegates here via the
+    # :jira_client_module Application env (FR-005, FR-006).
+    def validate_state_resolvability_for(states) do
+      case Process.get({__MODULE__, :validate_state_resolvability_for}) do
+        fun when is_function(fun, 1) -> fun.(states)
+        _ -> {:ok, []}
+      end
+    end
+
+    # Stub the rest of the Tracker behaviour so the adapter compiles cleanly
+    # even though only validate_state_resolvability_for/1 is exercised here.
+    def fetch_candidate_issues, do: {:ok, []}
+    def fetch_issues_by_states(_states), do: {:ok, []}
+    def fetch_issue_states_by_ids(_ids), do: {:ok, []}
+    def create_comment(_id, _body), do: :ok
+    def update_issue_state(_id, _state), do: :ok
+  end
+
+  describe "Jira workflow-state resolvability preflight (US5, T037-T039, FR-037)" do
+    setup do
+      env_var = "JIRA_API_TOKEN_US5_#{System.unique_integer([:positive])}"
+      previous = System.get_env(env_var)
+      System.put_env(env_var, "fake-jira-token-not-real")
+
+      previous_client = Application.get_env(:symphony_elixir, :jira_client_module)
+      Application.put_env(:symphony_elixir, :jira_client_module, FakeJiraClientResolvable)
+
+      on_exit(fn ->
+        restore_env(env_var, previous)
+
+        case previous_client do
+          nil -> Application.delete_env(:symphony_elixir, :jira_client_module)
+          mod -> Application.put_env(:symphony_elixir, :jira_client_module, mod)
+        end
+
+        Process.delete({FakeJiraClientResolvable, :validate_state_resolvability_for})
+      end)
+
+      {:ok, env_var: env_var}
+    end
+
+    test "T037 (US5 scenario 1): unresolved state name fails preflight with workflow_state_unresolvable",
+         %{env_var: env_var} do
+      Process.put(
+        {FakeJiraClientResolvable, :validate_state_resolvability_for},
+        fn _states -> {:ok, ["Code Review"]} end
+      )
+
+      write_jira_workflow_file!(Workflow.workflow_file_path(),
+        base_url: "https://jira.test",
+        email: "dev@example.com",
+        api_token: "$#{env_var}",
+        jql: "project = ENG",
+        active_states: ["Todo", "In Progress", "Code Review"],
+        terminal_states: ["Done"]
+      )
+
+      assert {:error, {:workflow_state_unresolvable, ["Code Review"]}} = Config.validate!()
+    end
+
+    test "T038 (US5 scenario 2): transport error → preflight WARN-and-proceed (fail-open)",
+         %{env_var: env_var} do
+      Process.put(
+        {FakeJiraClientResolvable, :validate_state_resolvability_for},
+        fn _states -> {:error, :transport} end
+      )
+
+      write_jira_workflow_file!(Workflow.workflow_file_path(),
+        base_url: "https://jira.test",
+        email: "dev@example.com",
+        api_token: "$#{env_var}",
+        jql: "project = ENG"
+      )
+
+      log =
+        capture_log(fn ->
+          assert :ok = Config.validate!()
+        end)
+
+      assert log =~ "workflow_state_resolvability"
+      assert log =~ "transport"
+    end
+
+    test "T039 (US5 scenario 3): tracker.kind == linear does NOT invoke validate_state_resolvability/0" do
+      # Set the fake to crash if invoked — linear-mode preflight must never
+      # call the optional callback (FR-003). Use put_env to flip back to Linear.
+      Process.put(
+        {FakeJiraClientResolvable, :validate_state_resolvability_for},
+        fn _states -> raise "must not be called for linear" end
+      )
+
+      write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "linear")
+
+      assert :ok = Config.validate!()
+    end
+  end
+
   defp write_jira_workflow_file!(path, opts) do
     base_url = Keyword.fetch!(opts, :base_url)
     email = Keyword.fetch!(opts, :email)
     api_token = Keyword.fetch!(opts, :api_token)
     poll_interval_ms = Keyword.get(opts, :poll_interval_ms, 30_000)
     allow_aggressive_polling = Keyword.get(opts, :allow_aggressive_polling, false)
+    active_states = Keyword.get(opts, :active_states, ["Todo", "In Progress"])
+    terminal_states = Keyword.get(opts, :terminal_states, ["Closed", "Done"])
 
     jql_yaml_scalar =
       case Keyword.fetch(opts, :jql_yaml) do
@@ -1509,12 +1612,16 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
         :error -> ~s("#{Keyword.fetch!(opts, :jql)}")
       end
 
+    states_yaml = fn list ->
+      "[" <> Enum.map_join(list, ", ", fn s -> "\"" <> s <> "\"" end) <> "]"
+    end
+
     workflow = """
     ---
     tracker:
       kind: "jira"
-      active_states: ["Todo", "In Progress"]
-      terminal_states: ["Closed", "Done"]
+      active_states: #{states_yaml.(active_states)}
+      terminal_states: #{states_yaml.(terminal_states)}
       jira:
         base_url: "#{base_url}"
         email: "#{email}"
