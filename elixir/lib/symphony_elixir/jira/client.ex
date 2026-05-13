@@ -524,9 +524,22 @@ defmodule SymphonyElixir.Jira.Client do
 
   defp normalize_labels(_labels), do: []
 
+  # FR-023: when description_format == "adf", raw ADF map passes through
+  # unchanged (operator opt-in to non-portable raw ADF). When unset or
+  # "text" (default), an ADF map is rendered to plain text via render_adf/2.
+  # Plain-text strings always pass through (Jira sometimes returns string
+  # descriptions for legacy issues).
   defp normalize_description(nil, _format), do: nil
   defp normalize_description(value, "adf") when is_map(value), do: value
   defp normalize_description(value, _format) when is_binary(value), do: value
+
+  defp normalize_description(value, _format) when is_map(value) do
+    case render_adf(value, log_lossy?: true) do
+      {:ok, rendered} -> rendered
+      {:error, _reason} -> nil
+    end
+  end
+
   defp normalize_description(_value, _format), do: nil
 
   defp build_issue_url(nil, _key), do: nil
