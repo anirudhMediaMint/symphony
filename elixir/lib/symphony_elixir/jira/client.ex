@@ -218,16 +218,186 @@ defmodule SymphonyElixir.Jira.Client do
   def fetch_issue_states_by_ids(_ids), do: {:error, :not_implemented}
 
   @doc """
-  Placeholder for the agent toolchain write-path. Lands in T065 (Phase 11).
+  Posts a comment on a Jira issue (FR-024). Body is wrapped in a minimal ADF
+  doc/paragraph/text envelope (jira-client-api.md §`create_comment/2`).
+
+  Accepts `request_fun:` + `base_url:`/`email:`/`api_token:` overrides for unit
+  tests. Production callers pass no opts — config comes from
+  `Config.settings!().tracker.jira`.
   """
   @spec create_comment(String.t(), String.t()) :: :ok | {:error, term()}
-  def create_comment(_issue_key, _body), do: {:error, :not_implemented}
+  def create_comment(issue_key, body), do: create_comment(issue_key, body, [])
+
+  @spec create_comment(String.t(), String.t(), keyword()) :: :ok | {:error, term()}
+  def create_comment(issue_key, body, opts)
+      when is_binary(issue_key) and is_binary(body) and is_list(opts) do
+    with {:ok, jira, request_fun} <- resolve_write_path_config(opts) do
+      url =
+        String.trim_trailing(jira.base_url, "/") <>
+          "/rest/api/3/issue/" <> issue_key <> "/comment"
+
+      headers = build_request_headers(jira.email, jira.api_token)
+
+      payload = %{
+        "body" => %{
+          "version" => 1,
+          "type" => "doc",
+          "content" => [
+            %{
+              "type" => "paragraph",
+              "content" => [%{"type" => "text", "text" => body}]
+            }
+          ]
+        }
+      }
+
+      case request_fun.(:post, url, headers, payload) do
+        {:ok, %{status: 201}} ->
+          log_request_success(:post, url, 201)
+          :ok
+
+        {:ok, response} ->
+          classify_error_response(response, url, jira.jql)
+
+        {:error, reason} ->
+          Logger.error("jira_api_request: #{inspect(reason)}")
+          {:error, {:jira_api_request, reason}}
+      end
+    end
+  end
 
   @doc """
-  Placeholder for the agent toolchain write-path. Lands in T065 (Phase 11).
+  Looks up the Jira transition id whose `to.name` matches `target_state_name`
+  case-insensitively (FR-025). Returns `:state_transition_not_available` for
+  zero matches and `:state_transition_ambiguous` for >1.
+  """
+  @spec find_transition(String.t(), String.t()) ::
+          {:ok, String.t()}
+          | {:error, :state_transition_not_available | :state_transition_ambiguous | term()}
+  def find_transition(issue_key, target_state_name),
+    do: find_transition(issue_key, target_state_name, [])
+
+  @spec find_transition(String.t(), String.t(), keyword()) ::
+          {:ok, String.t()}
+          | {:error, :state_transition_not_available | :state_transition_ambiguous | term()}
+  def find_transition(issue_key, target_state_name, opts)
+      when is_binary(issue_key) and is_binary(target_state_name) and is_list(opts) do
+    with {:ok, jira, request_fun} <- resolve_write_path_config(opts) do
+      url =
+        String.trim_trailing(jira.base_url, "/") <>
+          "/rest/api/3/issue/" <> issue_key <> "/transitions"
+
+      headers = build_request_headers(jira.email, jira.api_token)
+
+      case request_fun.(:get, url, headers, nil) do
+        {:ok, %{status: 200, body: %{"transitions" => transitions}}}
+        when is_list(transitions) ->
+          target_down = String.downcase(target_state_name)
+
+          matches =
+            Enum.filter(transitions, fn t ->
+              case get_in(t, ["to", "name"]) do
+                name when is_binary(name) -> String.downcase(name) == target_down
+                _ -> false
+              end
+            end)
+
+          case matches do
+            [] -> {:error, :state_transition_not_available}
+            [match] -> {:ok, Map.get(match, "id")}
+            _ -> {:error, :state_transition_ambiguous}
+          end
+
+        {:ok, response} ->
+          classify_error_response(response, url, jira.jql)
+
+        {:error, reason} ->
+          Logger.error("jira_api_request: #{inspect(reason)}")
+          {:error, {:jira_api_request, reason}}
+      end
+    end
+  end
+
+  @doc """
+  Executes a Jira transition by id (FR-025). 204 No Content → :ok.
+  """
+  @spec execute_transition(String.t(), String.t()) :: :ok | {:error, term()}
+  def execute_transition(issue_key, transition_id),
+    do: execute_transition(issue_key, transition_id, [])
+
+  @spec execute_transition(String.t(), String.t(), keyword()) :: :ok | {:error, term()}
+  def execute_transition(issue_key, transition_id, opts)
+      when is_binary(issue_key) and is_binary(transition_id) and is_list(opts) do
+    with {:ok, jira, request_fun} <- resolve_write_path_config(opts) do
+      url =
+        String.trim_trailing(jira.base_url, "/") <>
+          "/rest/api/3/issue/" <> issue_key <> "/transitions"
+
+      headers = build_request_headers(jira.email, jira.api_token)
+      body = %{"transition" => %{"id" => transition_id}}
+
+      case request_fun.(:post, url, headers, body) do
+        {:ok, %{status: 204}} ->
+          log_request_success(:post, url, 204)
+          :ok
+
+        {:ok, response} ->
+          classify_error_response(response, url, jira.jql)
+
+        {:error, reason} ->
+          Logger.error("jira_api_request: #{inspect(reason)}")
+          {:error, {:jira_api_request, reason}}
+      end
+    end
+  end
+
+  @doc """
+  Transitions an issue to a target state by name (FR-024, FR-025). Pipes
+  `find_transition/2` → `execute_transition/2`.
   """
   @spec update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}
-  def update_issue_state(_issue_key, _state_name), do: {:error, :not_implemented}
+  def update_issue_state(issue_key, state_name)
+      when is_binary(issue_key) and is_binary(state_name) do
+    with {:ok, transition_id} <- find_transition(issue_key, state_name) do
+      execute_transition(issue_key, transition_id)
+    end
+  end
+
+  # Pulls write-path config from opts (test override) or
+  # Config.settings!/0.tracker.jira (production). The opts shape mirrors the
+  # read-path `request_fun:` injection (FR-012). Returns `{:ok, jira_struct,
+  # request_fun}` or an error tuple if required fields are missing.
+  defp resolve_write_path_config(opts) do
+    request_fun = Keyword.get(opts, :request_fun, &default_request/4)
+
+    jira =
+      case Keyword.get(opts, :base_url) do
+        nil ->
+          Config.settings!().tracker.jira
+
+        base_url when is_binary(base_url) ->
+          %{
+            base_url: base_url,
+            email: Keyword.fetch!(opts, :email),
+            api_token: Keyword.fetch!(opts, :api_token),
+            jql: Keyword.get(opts, :jql)
+          }
+      end
+
+    cond do
+      not is_binary(jira && jira.base_url) ->
+        {:error, {:missing_tracker_config, :"tracker.jira.base_url"}}
+
+      not is_binary(jira && jira.email) ->
+        {:error, {:missing_tracker_config, :"tracker.jira.email"}}
+
+      not is_binary(jira && jira.api_token) ->
+        {:error, {:missing_tracker_config, :"tracker.jira.api_token"}}
+
+      true ->
+        {:ok, jira, request_fun}
+    end
+  end
 
   defp do_fetch_candidate_issues(jira, request_fun) do
     cap = effective_cap(jira.max_issues_per_poll)
@@ -427,6 +597,17 @@ defmodule SymphonyElixir.Jira.Client do
   defp default_request(:get, url, headers, _body) do
     Req.get(url,
       headers: headers,
+      redirect: false,
+      retry: false,
+      connect_options: [timeout: @connect_timeout_ms],
+      receive_timeout: @receive_timeout_ms
+    )
+  end
+
+  defp default_request(:post, url, headers, body) do
+    Req.post(url,
+      headers: headers,
+      json: body,
       redirect: false,
       retry: false,
       connect_options: [timeout: @connect_timeout_ms],
