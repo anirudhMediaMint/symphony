@@ -460,6 +460,10 @@ defmodule SymphonyElixir.Jira.Client do
     normalize_issue(issue, base_url, priority_map, description_format)
   end
 
+  @doc false
+  @spec render_adf_for_test(map()) :: {:ok, String.t()} | {:error, :jira_adf_depth_exceeded}
+  def render_adf_for_test(adf) when is_map(adf), do: render_adf(adf, log_lossy?: true)
+
   # ---------- Internal normalization ----------
 
   defp normalize_issue(%{"key" => key} = issue, base_url, priority_map, description_format)
@@ -548,4 +552,238 @@ defmodule SymphonyElixir.Jira.Client do
   end
 
   defp parse_datetime(_value), do: nil
+
+  # ---------- ADF rendering (FR-018, FR-019, FR-020, FR-021, FR-022, AC-009/010) ----------
+
+  # Renders an Atlassian Document Format document to plain text using the
+  # deterministic algorithm in SPEC §11.4.
+  #
+  # - Depth is bounded at @adf_max_depth (FR-019, NFR-SEC-004). Overflow returns
+  #   {:error, :jira_adf_depth_exceeded} and emits a WARN log.
+  # - Lossy substitutions for media/mention/inlineCard/blockCard/panel/emoji/
+  #   status/date are counted by category and surfaced in a single DEBUG line
+  #   per render (FR-022). Counts are accumulated in the process dictionary
+  #   for the duration of the render call.
+  # - inlineCard/blockCard URLs are filtered by URL-scheme allowlist
+  #   ({http, https}); any other scheme renders as `[link: filtered]`
+  #   (FR-020, NFR-SEC-005, AC-010).
+  # - Leaf text is scrubbed of ASCII control codepoints 0x00-0x1F and 0x7F,
+  #   except \n (0x0A) and \t (0x09) (FR-021).
+  # Block-level ADF node types. Within a doc, these get \n\n between
+  # top-level siblings and \n between block-level siblings in nested
+  # containers (panel, listItem, etc.). All other nodes are inline and
+  # concatenate with no separator.
+  @adf_block_types ~w(paragraph heading blockquote codeBlock listItem
+                      bulletList orderedList rule mediaGroup mediaSingle
+                      panel table tableRow tableCell tableHeader)
+
+  defp render_adf(adf, opts) when is_map(adf) do
+    log_lossy? = Keyword.get(opts, :log_lossy?, true)
+    pdict_key = {:adf_lossy_counts, make_ref()}
+    Process.put(pdict_key, %{})
+
+    try do
+      content = Map.get(adf, "content", [])
+      # Top-level doc content uses \n\n between block siblings. Depth starts
+      # at 0 so a chain of @adf_max_depth nested blocks fits exactly at the
+      # cap; the (@adf_max_depth + 1)-th level throws.
+      rendered = render_children(content, 0, pdict_key, "\n\n")
+
+      if log_lossy? do
+        log_lossy_render(Process.get(pdict_key, %{}))
+      end
+
+      {:ok, rendered}
+    catch
+      :throw, :adf_depth_exceeded ->
+        Logger.warning("jira_adf_depth_exceeded: observed depth > #{@adf_max_depth}")
+        {:error, :jira_adf_depth_exceeded}
+    after
+      Process.delete(pdict_key)
+    end
+  end
+
+  defp render_adf(_adf, _opts), do: {:ok, ""}
+
+  # Renders a children list using the provided block-sibling separator. Inline
+  # nodes always join with empty string regardless of this separator.
+  defp render_children(nodes, depth, pdict_key, block_sep) when is_list(nodes) do
+    nodes
+    |> Enum.map(&render_node(&1, depth, pdict_key))
+    |> Enum.reduce({[], nil}, fn current, {acc, prev_kind} ->
+      kind = current.kind
+      text = current.text
+
+      sep =
+        case {prev_kind, kind} do
+          {nil, _} -> ""
+          {:block, _} -> block_sep
+          {_, :block} -> block_sep
+          _ -> ""
+        end
+
+      {[text, sep | acc], kind}
+    end)
+    |> (fn {acc, _kind} -> acc |> Enum.reverse() |> IO.iodata_to_binary() end).()
+  end
+
+  defp render_children(_nodes, _depth, _pdict_key, _block_sep), do: ""
+
+  # render_node/3 returns %{text: binary, kind: :block | :inline}.
+  defp render_node(_node, depth, _pdict_key) when depth > @adf_max_depth do
+    throw(:adf_depth_exceeded)
+  end
+
+  defp render_node(%{"type" => "text"} = node, _depth, _pdict_key) do
+    text =
+      node
+      |> Map.get("text", "")
+      |> scrub_controls()
+
+    %{text: text, kind: :inline}
+  end
+
+  defp render_node(%{"type" => "media"} = node, _depth, pdict_key) do
+    bump_lossy(pdict_key, :media)
+    attrs = Map.get(node, "attrs", %{})
+    label = Map.get(attrs, "alt") || Map.get(attrs, "title") || "file"
+    %{text: "[image: #{label}]", kind: :inline}
+  end
+
+  defp render_node(%{"type" => "mention"} = node, _depth, pdict_key) do
+    bump_lossy(pdict_key, :mention)
+    attrs = Map.get(node, "attrs", %{})
+    display = Map.get(attrs, "text") || Map.get(attrs, "displayName")
+
+    text =
+      case display do
+        name when is_binary(name) and name != "" ->
+          "@" <> scrub_controls(name)
+
+        _ ->
+          account_id = Map.get(attrs, "id", "")
+          "@" <> String.slice(account_id, 0, 8)
+      end
+
+    %{text: text, kind: :inline}
+  end
+
+  defp render_node(%{"type" => "emoji"} = node, _depth, pdict_key) do
+    bump_lossy(pdict_key, :emoji)
+    attrs = Map.get(node, "attrs", %{})
+    text = Map.get(attrs, "shortName") || Map.get(attrs, "text") || ""
+    %{text: text, kind: :inline}
+  end
+
+  defp render_node(%{"type" => "status"} = node, _depth, pdict_key) do
+    bump_lossy(pdict_key, :status)
+    attrs = Map.get(node, "attrs", %{})
+    text = Map.get(attrs, "text") || ""
+    %{text: "[#{scrub_controls(text)}]", kind: :inline}
+  end
+
+  defp render_node(%{"type" => "date"} = node, _depth, pdict_key) do
+    bump_lossy(pdict_key, :date)
+    attrs = Map.get(node, "attrs", %{})
+    %{text: format_adf_date(Map.get(attrs, "timestamp")), kind: :inline}
+  end
+
+  defp render_node(%{"type" => type} = node, _depth, pdict_key)
+       when type in ["inlineCard", "blockCard"] do
+    attrs = Map.get(node, "attrs", %{})
+    url = Map.get(attrs, "url", "")
+
+    text =
+      if allowed_url_scheme?(url) do
+        "<" <> url <> ">"
+      else
+        bump_lossy(pdict_key, :link_filtered)
+        "[link: filtered]"
+      end
+
+    %{text: text, kind: :inline}
+  end
+
+  defp render_node(%{"type" => "panel"} = node, depth, pdict_key) do
+    bump_lossy(pdict_key, :panel)
+    attrs = Map.get(node, "attrs", %{})
+    panel_type = Map.get(attrs, "panelType", "info")
+    children = Map.get(node, "content", [])
+    inner = render_children(children, depth + 1, pdict_key, "\n")
+    %{text: "[panel:#{panel_type}]\n" <> inner, kind: :block}
+  end
+
+  defp render_node(%{"type" => type} = node, depth, pdict_key) when type in @adf_block_types do
+    children = Map.get(node, "content", [])
+    inner = render_children(children, depth + 1, pdict_key, "\n")
+    %{text: inner, kind: :block}
+  end
+
+  defp render_node(%{"content" => children}, depth, pdict_key) when is_list(children) do
+    # Unknown node with children: recurse without marker; treat as inline so
+    # text content concatenates without forced separators (FR-018).
+    inner = render_children(children, depth + 1, pdict_key, "\n")
+    %{text: inner, kind: :inline}
+  end
+
+  defp render_node(_node, _depth, _pdict_key), do: %{text: "", kind: :inline}
+
+  defp scrub_controls(text) when is_binary(text) do
+    text
+    |> :binary.bin_to_list()
+    |> Enum.reject(fn b ->
+      cond do
+        b == 0x0A -> false
+        b == 0x09 -> false
+        b < 0x20 -> true
+        b == 0x7F -> true
+        true -> false
+      end
+    end)
+    |> :binary.list_to_bin()
+  end
+
+  defp scrub_controls(_text), do: ""
+
+  defp allowed_url_scheme?(url) when is_binary(url) do
+    case URI.parse(url) do
+      %URI{scheme: scheme} when scheme in ["http", "https"] -> true
+      _ -> false
+    end
+  end
+
+  defp allowed_url_scheme?(_url), do: false
+
+  defp format_adf_date(timestamp) when is_binary(timestamp) do
+    case Integer.parse(timestamp) do
+      {ms, _} -> format_adf_date_ms(ms)
+      :error -> timestamp
+    end
+  end
+
+  defp format_adf_date(timestamp) when is_integer(timestamp), do: format_adf_date_ms(timestamp)
+  defp format_adf_date(_timestamp), do: ""
+
+  defp format_adf_date_ms(ms) when is_integer(ms) do
+    case DateTime.from_unix(ms, :millisecond) do
+      {:ok, dt} -> DateTime.to_iso8601(dt)
+      _ -> Integer.to_string(ms)
+    end
+  end
+
+  defp bump_lossy(pdict_key, category) do
+    counts = Process.get(pdict_key, %{})
+    Process.put(pdict_key, Map.update(counts, category, 1, &(&1 + 1)))
+  end
+
+  defp log_lossy_render(counts) when map_size(counts) == 0, do: :ok
+
+  defp log_lossy_render(counts) do
+    parts =
+      counts
+      |> Enum.sort_by(fn {k, _v} -> Atom.to_string(k) end)
+      |> Enum.map_join(" ", fn {k, v} -> "#{k}=#{v}" end)
+
+    Logger.debug("adf_lossy_render: #{parts}")
+  end
 end
