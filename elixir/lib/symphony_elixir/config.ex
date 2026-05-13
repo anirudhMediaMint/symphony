@@ -129,10 +129,38 @@ defmodule SymphonyElixir.Config do
         {:error, :missing_linear_project_slug}
 
       settings.tracker.kind == "jira" ->
-        validate_jira_required_fields(settings.tracker.jira)
+        with :ok <- validate_jira_required_fields(settings.tracker.jira) do
+          validate_jira_poll_interval(settings.tracker.jira, settings.polling)
+        end
 
       true ->
         :ok
+    end
+  end
+
+  # FR-036: when tracker.kind == "jira" and polling.interval_ms < 30_000,
+  # require explicit `tracker.jira.allow_aggressive_polling: true` override.
+  # Tuple shape names the configured interval, the 30_000 ms minimum, and
+  # the override key so operators get a one-step fix.
+  defp validate_jira_poll_interval(jira, polling) do
+    minimum_ms = 30_000
+    actual_ms = polling && polling.interval_ms
+    allow = jira && jira.allow_aggressive_polling
+
+    cond do
+      not is_integer(actual_ms) ->
+        :ok
+
+      actual_ms >= minimum_ms ->
+        :ok
+
+      allow == true ->
+        :ok
+
+      true ->
+        {:error,
+         {:jira_poll_interval_too_aggressive, actual_ms, minimum_ms,
+          :"tracker.jira.allow_aggressive_polling"}}
     end
   end
 
