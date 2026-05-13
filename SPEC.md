@@ -589,7 +589,7 @@ Validation checks:
   returns one or more unresolvable workflow-named states, preflight fails with
   `workflow_state_unresolvable` (a new entry in Section 11.5 Common errors), naming each
   unresolved state.
-- Jira poll-interval floor. When `tracker.kind == jira` and `agent.poll_interval_ms < 30000` and
+- Jira poll-interval floor. When `tracker.kind == jira` and `polling.interval_ms < 30000` and
   `tracker.jira.allow_aggressive_polling` is `false`, preflight MUST fail with
   `jira_poll_interval_too_aggressive` (see Section 11.5). The error message MUST name the
   configured interval, the minimum (`30000` ms), and the override key
@@ -618,7 +618,7 @@ not require recognizing or validating extension fields unless that extension is 
 - `tracker.jira.jql`: string, REQUIRED when `tracker.kind=jira`; raw JQL string used for candidate selection
 - `tracker.jira.priority_map`: map of string -> positive integer, OPTIONAL when `tracker.kind=jira`; resolves custom priority scheme names per Section 11.4
 - `tracker.jira.max_issues_per_poll`: integer, default `200`, MUST be ≥ 1; cap on cumulative normalized-issue count fetched per poll cycle (see Section 11.4)
-- `tracker.jira.allow_aggressive_polling`: boolean, default `false`; when `false`, preflight rejects `agent.poll_interval_ms < 30000` for Jira (see Sections 6.3 and 11.4)
+- `tracker.jira.allow_aggressive_polling`: boolean, default `false`; when `false`, preflight rejects `polling.interval_ms < 30000` for Jira (see Sections 6.3 and 11.4)
 - `polling.interval_ms`: integer, default `30000`
 - `workspace.root`: path resolved to absolute, default `<system-temp>/symphony_workspaces`
 - `hooks.after_create`: shell script or null
@@ -1526,7 +1526,7 @@ State resolvability preflight (`validate_state_resolvability`):
 Polling cadence:
 
 - Jira Cloud enforces account-level rate limits that vary by license tier; a poll interval below
-  30 seconds risks `429`s under load. The adapter requires `agent.poll_interval_ms ≥ 30000`
+  30 seconds risks `429`s under load. The adapter requires `polling.interval_ms ≥ 30000`
   unless `tracker.jira.allow_aggressive_polling: true` is set. Operators electing aggressive
   polling MUST own the rate-limit consequences; the orchestrator's existing backoff applies to
   `429` responses but does not protect the rate budget. Preflight (Section 6.3) rejects
@@ -1651,10 +1651,10 @@ Common:
   unresolved state. Operator action: configure the tracker so each referenced state is reachable
   from at least one initial status, or correct the state name in `WORKFLOW.md`.)
 - `jira_poll_interval_too_aggressive` (raised by preflight, Section 6.3, when
-  `tracker.kind == jira`, `agent.poll_interval_ms < 30000`, and
+  `tracker.kind == jira`, `polling.interval_ms < 30000`, and
   `tracker.jira.allow_aggressive_polling` is `false`. The error message MUST name the configured
   interval, the minimum (`30000` ms), and the override key. Operator action: raise
-  `agent.poll_interval_ms` to at least `30000` ms, or set
+  `polling.interval_ms` to at least `30000` ms, or set
   `tracker.jira.allow_aggressive_polling: true` and accept the rate-limit consequences.)
 - `jql_order_by_not_allowed` (raised by preflight, Section 6.3, when `tracker.kind == jira` and
   `tracker.jira.jql` contains an `ORDER BY` clause (case-insensitive token scan). The error
