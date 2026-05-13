@@ -924,7 +924,11 @@ defmodule SymphonyElixir.Jira.ClientTest do
       File.mkdir_p!(workflow_root)
       workflow_file = Path.join(workflow_root, "WORKFLOW.md")
 
-      long_jql = "project = ENG AND " <> String.duplicate("summary ~ \"x\" OR ", 30) <> "status = Todo"
+      # Long JQL (>200 chars) to verify the WARN-log truncation. Kept free of
+      # double-quotes so it embeds cleanly into the YAML scalar below.
+      long_jql =
+        "project = ENG AND " <>
+          String.duplicate("status = Todo OR ", 30) <> "status = InProgress"
 
       File.write!(workflow_file, """
       ---
