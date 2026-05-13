@@ -188,12 +188,12 @@ description: "Task list for Elixir Jira Adapter (Phase 3 output)"
 
 ### Tests for US6 (RED)
 
-- [ ] T045 [P] [US6] RED test: in `elixir/test/symphony_elixir/jira/client_test.exs`, add test that `Jira.Client.apply_priority_map_for_test/2` with `priority_map: %{"P0" => 1, "P1" => 2}` maps `"P1" → 2` and `"Critical" → nil` (FR-016, US6 scenarios 1+2). Already partially covered by T020 — extend with custom-map case.
-- [ ] T046 [P] [US6] RED test: same file, add integration test that `Jira.Client.fetch_candidate_issues/1` with a priority_map in config normalizes an issue's priority correctly end-to-end.
+- [x] T045 [P] [US6] RED test: in `elixir/test/symphony_elixir/jira/client_test.exs`, add test that `Jira.Client.apply_priority_map_for_test/2` with `priority_map: %{"P0" => 1, "P1" => 2}` maps `"P1" → 2` and `"Critical" → nil` (FR-016, US6 scenarios 1+2). Already partially covered by T020 — extend with custom-map case.
+- [x] T046 [P] [US6] RED test: same file, add integration test that `Jira.Client.fetch_candidate_issues/1` with a priority_map in config normalizes an issue's priority correctly end-to-end.
 
 ### Implementation for US6 (GREEN)
 
-- [ ] T047 [US6] GREEN: extend `apply_priority_map_for_test/2` and the normalization pipeline in `elixir/lib/symphony_elixir/jira/client.ex` to apply operator-supplied `tracker.jira.priority_map` with case-sensitive lookup, falling back to the default `Highest/High/Medium/Low/Lowest` map only when no operator map is supplied (FR-016). T045 + T046 pass.
+- [x] T047 [US6] GREEN: extend `apply_priority_map_for_test/2` and the normalization pipeline in `elixir/lib/symphony_elixir/jira/client.ex` to apply operator-supplied `tracker.jira.priority_map` with case-sensitive lookup, falling back to the default `Highest/High/Medium/Low/Lowest` map only when no operator map is supplied (FR-016). T045 + T046 pass.
 
 **Checkpoint US6**: Custom priority schemes (P0/P1/P2/P3) normalize correctly; defaults preserved when no map.
 
