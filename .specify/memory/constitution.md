@@ -40,6 +40,13 @@ Templates audited:
   - .specify/templates/constitution-template.md ✅ template untouched.
 
 Follow-up TODOs: none.
+
+---
+
+Version change: 1.1.0 → 1.1.1.
+Rationale: PATCH — clarified Architecture Constraints "Tracker scope" bullet to
+reflect Linear + Jira Cloud per SPEC §11. Multi-tracker support landed at v1.1.0
+via Principle II; the Tracker-scope constraint still read pre-amendment text.
 -->
 
 # Symphony Constitution
@@ -128,9 +135,10 @@ will not let operator features creep into the orchestration critical path.
   app-server version is the source of truth for protocol shape; Symphony passes
   `approval_policy`, `thread_sandbox`, and `turn_sandbox_policy` through as Codex-owned
   values.
-- **Tracker scope**: Linear is the only supported tracker in this spec version. The
-  tracker client normalizes payloads into a stable issue model; adding a new tracker
-  means a new adapter that produces the same normalized shape.
+- **Tracker scope**: Linear and Jira Cloud are the supported trackers in this spec
+  version (see `SPEC.md` §11). The tracker client normalizes payloads into a stable
+  issue model; adding a new tracker means a new adapter that produces the same
+  normalized shape.
 - **Concurrency**: Global cap via `agent.max_concurrent_agents` (default 10) plus optional
   per-state caps. Stall detection uses `codex.stall_timeout_ms`. Retry backoff is
   `min(10000 * 2^(attempt - 1), agent.max_retry_backoff_ms)` for failures, `1000ms` for
@@ -177,4 +185,4 @@ will not let operator features creep into the orchestration critical path.
 - Complexity that violates a principle MUST be justified in writing in the PR description.
   "It works" is not a justification.
 
-**Version**: 1.1.0 | **Ratified**: 2026-05-12 | **Last Amended**: 2026-05-12
+**Version**: 1.1.1 | **Ratified**: 2026-05-12 | **Last Amended**: 2026-05-13
