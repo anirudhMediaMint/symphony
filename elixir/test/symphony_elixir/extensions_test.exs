@@ -306,6 +306,33 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert_receive :fake_jira_fetch_candidate_issues_called
   end
 
+  describe "Jira.Adapter remaining callback delegations (T077, FR-048, NFR-Q-001, AC-005)" do
+    setup do
+      Application.put_env(:symphony_elixir, :jira_client_module, FakeJiraClient)
+      :ok
+    end
+
+    test "fetch_issues_by_states/1 delegates to client_module().fetch_issues_by_states/1" do
+      assert {:ok, []} = SymphonyElixir.Jira.Adapter.fetch_issues_by_states(["Todo", "Done"])
+      assert_receive {:fake_jira_fetch_issues_by_states_called, ["Todo", "Done"]}
+    end
+
+    test "fetch_issue_states_by_ids/1 delegates to client_module().fetch_issue_states_by_ids/1" do
+      assert {:ok, []} = SymphonyElixir.Jira.Adapter.fetch_issue_states_by_ids(["ENG-1", "ENG-2"])
+      assert_receive {:fake_jira_fetch_issue_states_by_ids_called, ["ENG-1", "ENG-2"]}
+    end
+
+    test "create_comment/2 delegates to client_module().create_comment/2" do
+      assert :ok = SymphonyElixir.Jira.Adapter.create_comment("ENG-1", "hello world")
+      assert_receive {:fake_jira_create_comment_called, "ENG-1", "hello world"}
+    end
+
+    test "update_issue_state/2 delegates to client_module().update_issue_state/2" do
+      assert :ok = SymphonyElixir.Jira.Adapter.update_issue_state("ENG-1", "Done")
+      assert_receive {:fake_jira_update_issue_state_called, "ENG-1", "Done"}
+    end
+  end
+
   test "T040 Jira.Adapter.validate_state_resolvability/0 collects active_states ++ terminal_states (Gate 2 FR-038 substitution), de-dupes, and delegates to the client" do
     # Gate 2 substitution: FR-038 spec text references a transition-mapping
     # config surface that does not exist in v1. The adapter's input scope is
