@@ -105,12 +105,12 @@ description: "Task list for Elixir Jira Adapter (Phase 3 output)"
 
 ### Tests for US2 (RED)
 
-- [ ] T028 [P] [US2] RED test: in `elixir/test/symphony_elixir/extensions_test.exs`, add test that updating `WORKFLOW.md` from Linear to Jira config causes `Tracker.adapter/0` to return `SymphonyElixir.Jira.Adapter` on next call (FR-002 + NFR-PERF-005). Uses `WorkflowStore.force_reload/0` semantics.
-- [ ] T029 [P] [US2] RED test: same file, add test that an in-flight Linear worker (mocked) continues after the swap — the `Tracker.Issue` struct in flight remains valid, no crash.
+- [x] T028 [P] [US2] RED test: in `elixir/test/symphony_elixir/extensions_test.exs`, add test that updating `WORKFLOW.md` from Linear to Jira config causes `Tracker.adapter/0` to return `SymphonyElixir.Jira.Adapter` on next call (FR-002 + NFR-PERF-005). Uses `WorkflowStore.force_reload/0` semantics.
+- [x] T029 [P] [US2] RED test: same file, add test that an in-flight Linear worker (mocked) continues after the swap — the `Tracker.Issue` struct in flight remains valid, no crash.
 
 ### Implementation for US2 (GREEN)
 
-- [ ] T030 [US2] GREEN: NO new module code expected — `WorkflowStore` semantics already handle this. The work is verifying that no caching of `adapter()` resolution exists in `lib/symphony_elixir/orchestrator.ex` or `agent_runner.ex` that would prevent the swap. If a cache exists, remove it (surgical, file-by-file). T028 + T029 pass.
+- [x] T030 [US2] GREEN: NO new module code expected — `WorkflowStore` semantics already handle this. The work is verifying that no caching of `adapter()` resolution exists in `lib/symphony_elixir/orchestrator.ex` or `agent_runner.ex` that would prevent the swap. If a cache exists, remove it (surgical, file-by-file). T028 + T029 pass. **Verified**: `Tracker.adapter/0` re-resolves per call from `Config.settings!().tracker.kind`; `Config.settings!/0` re-reads via `Workflow.current/0` → `WorkflowStore.current/0` which auto-reloads on file stamp changes. `orchestrator.ex` and `agent_runner.ex` only call `Tracker.fetch_*` / `Config.settings!()` per-tick — no caching. No lib/ changes required.
 
 **Checkpoint US2**: Hot-reload from Linear → Jira works end-to-end against `FakeJiraClient` + existing Linear mocks.
 
