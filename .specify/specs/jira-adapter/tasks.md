@@ -227,11 +227,11 @@ description: "Task list for Elixir Jira Adapter (Phase 3 output)"
 
 ### Tests for US8 (RED)
 
-- [ ] T052 [P] [US8] RED test: in `elixir/test/symphony_elixir/extensions_test.exs` (or `core_test.exs` adjacent to existing `PromptBuilder` tests — match existing pattern), add test rendering the existing prompt template against (a) a Linear-sourced `Tracker.Issue` fixture and (b) a Jira-sourced `Tracker.Issue` fixture with the same field values except `branch_name = nil`. Assert output is identical modulo the `branch_name` substitution (US8 scenarios 1+2).
+- [X] T052 [P] [US8] RED test: in `elixir/test/symphony_elixir/extensions_test.exs` (or `core_test.exs` adjacent to existing `PromptBuilder` tests — match existing pattern), add test rendering the existing prompt template against (a) a Linear-sourced `Tracker.Issue` fixture and (b) a Jira-sourced `Tracker.Issue` fixture with the same field values except `branch_name = nil`. Assert output is identical modulo the `branch_name` substitution (US8 scenarios 1+2).
 
 ### Implementation for US8 (GREEN)
 
-- [ ] T053 [US8] GREEN: NO new code expected; this story tests the Phase 2 rename invariant. If the test exposes a bug (e.g., a stale `Linear.Issue` reference in the template renderer), fix surgically. T052 passes.
+- [X] T053 [US8] GREEN: NO new code expected; this story tests the Phase 2 rename invariant. If the test exposes a bug (e.g., a stale `Linear.Issue` reference in the template renderer), fix surgically. T052 passes. **Outcome**: invariant held — no code change required. `PromptBuilder` operates on the unified `Tracker.Issue` struct and is adapter-agnostic; `branch_name: nil` renders as empty string via Solid's default `nil` handling.
 
 **Checkpoint US8**: Constitutional invariant verified — issue portability holds.
 
