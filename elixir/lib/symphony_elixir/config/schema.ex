@@ -430,9 +430,21 @@ defmodule SymphonyElixir.Config.Schema do
   defp finalize_settings(settings) do
     jira = finalize_jira_tracker(settings.tracker.jira)
 
+    # FR-029: when both flat and nested Linear keys carry the same value,
+    # nested wins. The orchestrator still reads flat
+    # settings.tracker.api_key / project_slug, so merge nested into flat when
+    # the flat field is absent OR identical (Config.validate!/0 separately
+    # surfaces a conflict tuple when the two diverge).
+    nested_linear = settings.tracker.linear
+    merged_api_key = merge_linear_field(settings.tracker.api_key, nested_linear && nested_linear.api_key)
+    merged_project_slug = merge_linear_field(settings.tracker.project_slug, nested_linear && nested_linear.project_slug)
+    merged_endpoint = merge_linear_field(settings.tracker.endpoint, nested_linear && nested_linear.endpoint)
+
     tracker = %{
       settings.tracker
-      | api_key: resolve_secret_setting(settings.tracker.api_key, System.get_env("LINEAR_API_KEY")),
+      | endpoint: merged_endpoint,
+        api_key: resolve_secret_setting(merged_api_key, System.get_env("LINEAR_API_KEY")),
+        project_slug: merged_project_slug,
         assignee: resolve_secret_setting(settings.tracker.assignee, System.get_env("LINEAR_ASSIGNEE")),
         jira: jira
     }
@@ -456,6 +468,19 @@ defmodule SymphonyElixir.Config.Schema do
   end
 
   defp finalize_jira_tracker(jira), do: jira
+
+  # FR-028, FR-029: merge nested Linear key into the flat field when the flat
+  # field is absent or identical. Divergent values are NOT merged here —
+  # `Config.validate!/0` produces a `:tracker_config_conflict` error in that
+  # case. Returns the value the orchestrator should see.
+  defp merge_linear_field(flat, nil), do: flat
+  defp merge_linear_field(nil, nested), do: nested
+
+  defp merge_linear_field(flat, nested) when is_binary(flat) and is_binary(nested) do
+    if flat == nested, do: nested, else: flat
+  end
+
+  defp merge_linear_field(flat, _nested), do: flat
 
   # FR-031: Only `$JIRA_API_TOKEN` (or any `$VAR` reference) is accepted.
   # Literal tokens in `WORKFLOW.md` resolve to `nil`, which `Config.validate!/0`

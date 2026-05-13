@@ -125,19 +125,85 @@ defmodule SymphonyElixir.Config do
       settings.tracker.kind not in ["linear", "jira", "memory"] ->
         {:error, {:unsupported_tracker_kind, settings.tracker.kind}}
 
-      settings.tracker.kind == "linear" and not is_binary(settings.tracker.api_key) ->
-        {:error, :missing_linear_api_token}
-
-      settings.tracker.kind == "linear" and not is_binary(settings.tracker.project_slug) ->
-        {:error, :missing_linear_project_slug}
+      settings.tracker.kind == "linear" ->
+        with :ok <- validate_linear_flat_nested_keys(settings.tracker),
+             :ok <- validate_linear_required_fields(settings.tracker) do
+          :ok
+        end
 
       settings.tracker.kind == "jira" ->
-        with :ok <- validate_jira_required_fields(settings.tracker.jira),
+        with :ok <- validate_jira_base_url(settings.tracker.jira),
+             :ok <- validate_jira_required_fields(settings.tracker.jira),
              :ok <- validate_jira_poll_interval(settings.tracker.jira, settings.polling) do
           validate_jira_workflow_state_resolvability()
         end
 
       true ->
+        :ok
+    end
+  end
+
+  # FR-039: linear-mode missing-field checks only fire when kind == "linear".
+  # Reads the nested-merged value (Linear adapter still reads flat
+  # settings.tracker.api_key / project_slug post-merge — see Schema.finalize_settings/1).
+  defp validate_linear_required_fields(tracker) do
+    cond do
+      not is_binary(tracker.api_key) -> {:error, :missing_linear_api_token}
+      not is_binary(tracker.project_slug) -> {:error, :missing_linear_project_slug}
+      true -> :ok
+    end
+  end
+
+  # FR-028, FR-029, FR-030: flat/nested key compatibility for Linear ONLY.
+  # When BOTH flat (`tracker.<field>`) and nested (`tracker.linear.<field>`)
+  # are present: identical → WARN (FR-029), divergent →
+  # `:tracker_config_conflict` (FR-030). Jira is silently exempt (FR-028).
+  defp validate_linear_flat_nested_keys(tracker) do
+    nested = tracker.linear
+
+    # NOTE: `endpoint` has a non-nil default on BOTH the flat and nested fields,
+    # so we cannot distinguish operator-supplied from default. Only `api_key`
+    # and `project_slug` (no defaults) participate in conflict/redundancy
+    # detection (FR-029, FR-030). Per-field merge still happens in
+    # Config.Schema.finalize_settings/1 for orchestrator back-compat.
+    [{:api_key, tracker.api_key, nested && nested.api_key, :"tracker.api_key", :"tracker.linear.api_key"},
+     {:project_slug, tracker.project_slug, nested && nested.project_slug,
+      :"tracker.project_slug", :"tracker.linear.project_slug"}]
+    |> Enum.reduce_while(:ok, fn {_field, flat, nested_val, flat_key, nested_key}, _acc ->
+      cond do
+        is_nil(flat) or flat == "" ->
+          {:cont, :ok}
+
+        is_nil(nested_val) or nested_val == "" ->
+          {:cont, :ok}
+
+        flat == nested_val ->
+          Logger.warning(
+            "redundant flat tracker key: #{flat_key} duplicates #{nested_key}; keep only the nested form"
+          )
+
+          {:cont, :ok}
+
+        true ->
+          {:halt, {:error, {:tracker_config_conflict, flat_key, nested_key}}}
+      end
+    end)
+  end
+
+  # FR-032 / NFR-SEC-002: base_url MUST be `https://<host>`. Shape only — no
+  # TLD allowlist (SEC-3 explicit). Trailing slash tolerated by client.
+  defp validate_jira_base_url(jira) do
+    case jira && jira.base_url do
+      url when is_binary(url) ->
+        case URI.parse(url) do
+          %URI{scheme: "https", host: host} when is_binary(host) and host != "" ->
+            :ok
+
+          _ ->
+            {:error, {:missing_tracker_config, :"tracker.jira.base_url"}}
+        end
+
+      _ ->
         :ok
     end
   end
