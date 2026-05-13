@@ -436,9 +436,13 @@ defmodule SymphonyElixir.Config.Schema do
     # the flat field is absent OR identical (Config.validate!/0 separately
     # surfaces a conflict tuple when the two diverge).
     nested_linear = settings.tracker.linear
-    merged_api_key = merge_linear_field(settings.tracker.api_key, nested_linear && nested_linear.api_key)
-    merged_project_slug = merge_linear_field(settings.tracker.project_slug, nested_linear && nested_linear.project_slug)
-    merged_endpoint = merge_linear_field(settings.tracker.endpoint, nested_linear && nested_linear.endpoint)
+    nested_api_key = nested_linear && nested_linear.api_key
+    nested_project_slug = nested_linear && nested_linear.project_slug
+    nested_endpoint = nested_linear && nested_linear.endpoint
+
+    merged_api_key = merge_linear_field(settings.tracker.api_key, nested_api_key)
+    merged_project_slug = merge_linear_field(settings.tracker.project_slug, nested_project_slug)
+    merged_endpoint = merge_linear_field(settings.tracker.endpoint, nested_endpoint)
 
     tracker = %{
       settings.tracker

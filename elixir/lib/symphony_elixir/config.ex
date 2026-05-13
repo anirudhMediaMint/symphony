@@ -166,9 +166,12 @@ defmodule SymphonyElixir.Config do
     # and `project_slug` (no defaults) participate in conflict/redundancy
     # detection (FR-029, FR-030). Per-field merge still happens in
     # Config.Schema.finalize_settings/1 for orchestrator back-compat.
-    [{:api_key, tracker.api_key, nested && nested.api_key, :"tracker.api_key", :"tracker.linear.api_key"},
-     {:project_slug, tracker.project_slug, nested && nested.project_slug,
-      :"tracker.project_slug", :"tracker.linear.project_slug"}]
+    [
+      {:api_key, tracker.api_key, nested && nested.api_key, :"tracker.api_key",
+       :"tracker.linear.api_key"},
+      {:project_slug, tracker.project_slug, nested && nested.project_slug,
+       :"tracker.project_slug", :"tracker.linear.project_slug"}
+    ]
     |> Enum.reduce_while(:ok, fn {_field, flat, nested_val, flat_key, nested_key}, _acc ->
       cond do
         is_nil(flat) or flat == "" ->

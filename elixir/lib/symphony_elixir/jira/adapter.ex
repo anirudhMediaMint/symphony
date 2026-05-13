@@ -44,7 +44,6 @@ defmodule SymphonyElixir.Jira.Adapter do
   def update_issue_state(issue_id, state_name),
     do: client_module().update_issue_state(issue_id, state_name)
 
-  @impl true
   @doc """
   Reports workflow state names the configured Jira projects cannot resolve.
 
@@ -56,6 +55,7 @@ defmodule SymphonyElixir.Jira.Adapter do
   De-dupes case-preserving (first occurrence wins). Delegates to the
   configured client module's `validate_state_resolvability_for/1`.
   """
+  @impl true
   @spec validate_state_resolvability() :: {:ok, [String.t()]} | {:error, term()}
   def validate_state_resolvability do
     tracker = Config.settings!().tracker
