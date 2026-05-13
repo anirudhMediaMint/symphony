@@ -19,7 +19,11 @@ defmodule SymphonyElixir.Jira.Client do
   @receive_timeout_ms 60_000
 
   # FR-016 default priority map. Lookup is case-sensitive against
-  # `fields.priority.name` returned by Jira Cloud.
+  # `fields.priority.name` returned by Jira Cloud. Used only when the
+  # operator-supplied `tracker.jira.priority_map` is the empty map (the
+  # schema default). When the operator supplies a non-empty map, that map
+  # is used exclusively — unknown names yield `nil` rather than falling
+  # back to this default (FR-016, US6).
   @default_priority_map %{
     "Highest" => 1,
     "High" => 2,
