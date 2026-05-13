@@ -1,6 +1,8 @@
 defmodule SymphonyElixir.Jira.ClientTest do
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias SymphonyElixir.Jira.Client
   alias SymphonyElixir.Tracker.Issue
 
@@ -478,6 +480,79 @@ defmodule SymphonyElixir.Jira.ClientTest do
 
       assert {:ok, [issue]} = Client.fetch_candidate_issues(request_fun: fake_request)
       assert %Issue{identifier: "ENG-100", priority: 1} = issue
+    end
+  end
+
+  describe "fetch_candidate_issues/1 maps HTTP 401 to tracker_unauthorized (T048, US7, FR-040, FR-041, AC-008)" do
+    test "returns {:error, :tracker_unauthorized} and never leaks the token or Basic-auth blob" do
+      env_var = "JIRA_API_TOKEN_T048_#{System.unique_integer([:positive])}"
+      previous = System.get_env(env_var)
+      System.put_env(env_var, "fake-jira-token-not-real")
+
+      on_exit(fn ->
+        case previous do
+          nil -> System.delete_env(env_var)
+          val -> System.put_env(env_var, val)
+        end
+      end)
+
+      workflow_root =
+        Path.join(
+          System.tmp_dir!(),
+          "symphony-elixir-jira-client-test-t048-#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(workflow_root)
+      workflow_file = Path.join(workflow_root, "WORKFLOW.md")
+
+      File.write!(workflow_file, """
+      ---
+      tracker:
+        kind: "jira"
+        active_states: ["Todo", "In Progress"]
+        terminal_states: ["Closed", "Done"]
+        jira:
+          base_url: "https://jira.test"
+          email: "dev@example.com"
+          api_token: "$#{env_var}"
+          jql: "project = ENG"
+      polling:
+        interval_ms: 30000
+      ---
+      You are an agent for this repository.
+      """)
+
+      SymphonyElixir.Workflow.set_workflow_file_path(workflow_file)
+
+      if Process.whereis(SymphonyElixir.WorkflowStore) do
+        try do
+          SymphonyElixir.WorkflowStore.force_reload()
+        catch
+          :exit, _ -> :ok
+        end
+      end
+
+      on_exit(fn ->
+        Application.delete_env(:symphony_elixir, :workflow_file_path)
+        File.rm_rf(workflow_root)
+      end)
+
+      fake_401 = fn :get, _url, _headers, _body ->
+        {:ok, %{status: 401, body: ~s({"errorMessages":["Unauthorized"]})}}
+      end
+
+      assert {:error, :tracker_unauthorized} =
+               result = Client.fetch_candidate_issues(request_fun: fake_401)
+
+      # FR-040/FR-041: MUST be :tracker_unauthorized, NOT conflated with
+      # :missing_tracker_config or :jira_api_status.
+      refute match?({:error, {:missing_tracker_config, _}}, result)
+      refute match?({:error, {:jira_api_status, _}}, result)
+
+      # AC-008 / FR-042 / NFR-SEC-008 — neither the token nor the Basic-auth
+      # blob may appear in the bubbled error tuple.
+      refute inspect(result) =~ "fake-jira-token-not-real"
+      refute inspect(result) =~ "Basic "
     end
   end
 end
