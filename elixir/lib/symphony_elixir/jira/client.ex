@@ -465,6 +465,43 @@ defmodule SymphonyElixir.Jira.Client do
   @spec render_adf_for_test(map()) :: {:ok, String.t()} | {:error, :jira_adf_depth_exceeded}
   def render_adf_for_test(adf) when is_map(adf), do: render_adf(adf, log_lossy?: true)
 
+  @doc false
+  # FR-017: extracts blocked-by refs from `fields.issuelinks`. Only includes
+  # links where `type.name == "Blocks"` AND `type.inward == "is blocked by"`
+  # AND an `inwardIssue` is populated (outward direction is the blocker on
+  # the OTHER side, not relevant here).
+  @spec extract_blocked_by_for_test(map()) :: [%{id: String.t() | nil, key: String.t() | nil, status: String.t() | nil}]
+  def extract_blocked_by_for_test(issue) when is_map(issue) do
+    fields = Map.get(issue, "fields", %{})
+    links = Map.get(fields, "issuelinks", [])
+
+    if is_list(links) do
+      Enum.flat_map(links, &extract_blocked_by_one/1)
+    else
+      []
+    end
+  end
+
+  def extract_blocked_by_for_test(_issue), do: []
+
+  defp extract_blocked_by_one(%{"type" => %{"name" => "Blocks", "inward" => "is blocked by"}} = link) do
+    case Map.get(link, "inwardIssue") do
+      %{} = inward ->
+        [
+          %{
+            id: stringify(Map.get(inward, "id")),
+            key: Map.get(inward, "key"),
+            status: get_in(inward, ["fields", "status", "name"])
+          }
+        ]
+
+      _ ->
+        []
+    end
+  end
+
+  defp extract_blocked_by_one(_link), do: []
+
   # ---------- Internal normalization ----------
 
   defp normalize_issue(%{"key" => key} = issue, base_url, priority_map, description_format)
@@ -481,7 +518,7 @@ defmodule SymphonyElixir.Jira.Client do
       branch_name: nil,
       url: build_issue_url(base_url, key),
       assignee_id: nil,
-      blocked_by: [],
+      blocked_by: extract_blocked_by_for_test(issue),
       labels: normalize_labels(fields["labels"]),
       assigned_to_worker: true,
       created_at: parse_datetime(fields["created"]),
