@@ -205,6 +205,20 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert SymphonyElixir.Tracker.adapter() == Adapter
   end
 
+  test "tracker.adapter/0 routes tracker.kind: \"jira\" to Jira.Adapter" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "jira")
+
+    assert Config.settings!().tracker.kind == "jira"
+    assert SymphonyElixir.Tracker.adapter() == SymphonyElixir.Jira.Adapter
+  end
+
+  test "tracker.validate_state_resolvability/0 returns {:ok, []} when the adapter does not implement the callback" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "linear")
+
+    assert SymphonyElixir.Tracker.adapter() == Adapter
+    assert {:ok, []} = SymphonyElixir.Tracker.validate_state_resolvability()
+  end
+
   test "linear adapter delegates reads and validates mutation responses" do
     Application.put_env(:symphony_elixir, :linear_client_module, FakeLinearClient)
 
