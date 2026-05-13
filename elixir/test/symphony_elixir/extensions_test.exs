@@ -246,6 +246,41 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert SymphonyElixir.Tracker.adapter() == SymphonyElixir.Jira.Adapter
   end
 
+  test "hot-reload from Linear to Jira swaps Tracker.adapter/0 on next call (US2, FR-002, NFR-PERF-005)" do
+    ensure_workflow_store_running()
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "linear")
+
+    assert Config.settings!().tracker.kind == "linear"
+    assert SymphonyElixir.Tracker.adapter() == Adapter
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "jira")
+    assert :ok = WorkflowStore.force_reload()
+
+    assert Config.settings!().tracker.kind == "jira"
+    assert SymphonyElixir.Tracker.adapter() == SymphonyElixir.Jira.Adapter
+  end
+
+  test "in-flight Linear Tracker.Issue remains valid after hot-reload to Jira (US2)" do
+    ensure_workflow_store_running()
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "linear")
+    assert SymphonyElixir.Tracker.adapter() == Adapter
+
+    # Simulate an in-flight worker that captured an Issue under the Linear adapter.
+    in_flight = %Issue{id: "issue-flight", identifier: "MT-9", state: "In Progress"}
+
+    # Operator swaps WORKFLOW.md to Jira mid-flight.
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "jira")
+    assert :ok = WorkflowStore.force_reload()
+    assert SymphonyElixir.Tracker.adapter() == SymphonyElixir.Jira.Adapter
+
+    # The previously captured Issue struct is unchanged; pattern matching and
+    # field access still work — no crash, no struct corruption.
+    assert %Issue{id: "issue-flight", identifier: "MT-9", state: "In Progress"} = in_flight
+    assert in_flight.id == "issue-flight"
+    assert in_flight.identifier == "MT-9"
+    assert in_flight.state == "In Progress"
+  end
+
   test "tracker.validate_state_resolvability/0 returns {:ok, []} when the adapter does not implement the callback" do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "linear")
 
