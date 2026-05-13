@@ -3,6 +3,8 @@ defmodule SymphonyElixir.Jira.ClientTest do
 
   import ExUnit.CaptureLog
 
+  require Logger
+
   alias SymphonyElixir.Jira.Client
   alias SymphonyElixir.Tracker.Issue
 
@@ -1020,6 +1022,266 @@ defmodule SymphonyElixir.Jira.ClientTest do
 
       assert String.length(jql_excerpt) > 0
       assert String.length(jql_excerpt) <= 200
+    end
+  end
+
+  describe "render_adf_for_test/1 (T057, FR-018, FR-019, FR-021, FR-022, AC-009)" do
+    test "concatenates leaf text within a paragraph block" do
+      adf = %{
+        "type" => "doc",
+        "version" => 1,
+        "content" => [
+          %{
+            "type" => "paragraph",
+            "content" => [
+              %{"type" => "text", "text" => "Hello "},
+              %{"type" => "text", "text" => "world"}
+            ]
+          }
+        ]
+      }
+
+      assert {:ok, "Hello world"} = Client.render_adf_for_test(adf)
+    end
+
+    test "inserts \\n\\n between top-level block nodes" do
+      adf = %{
+        "type" => "doc",
+        "version" => 1,
+        "content" => [
+          %{"type" => "paragraph", "content" => [%{"type" => "text", "text" => "First"}]},
+          %{"type" => "paragraph", "content" => [%{"type" => "text", "text" => "Second"}]}
+        ]
+      }
+
+      assert {:ok, "First\n\nSecond"} = Client.render_adf_for_test(adf)
+    end
+
+    test "scrubs ASCII controls from leaf text but preserves \\n and \\t" do
+      adf = %{
+        "type" => "doc",
+        "version" => 1,
+        "content" => [
+          %{
+            "type" => "paragraph",
+            "content" => [
+              %{"type" => "text", "text" => "a\x00b\x01c\nd\te\x7Ff"}
+            ]
+          }
+        ]
+      }
+
+      assert {:ok, "abc\nd\tef"} = Client.render_adf_for_test(adf)
+    end
+
+    test "media node renders as [image: <alt or title or 'file'>]" do
+      adf_alt = %{
+        "type" => "doc",
+        "version" => 1,
+        "content" => [
+          %{
+            "type" => "paragraph",
+            "content" => [%{"type" => "media", "attrs" => %{"alt" => "diagram"}}]
+          }
+        ]
+      }
+
+      assert {:ok, "[image: diagram]"} = Client.render_adf_for_test(adf_alt)
+
+      adf_title = %{
+        "type" => "doc",
+        "version" => 1,
+        "content" => [
+          %{
+            "type" => "paragraph",
+            "content" => [%{"type" => "media", "attrs" => %{"title" => "the-file"}}]
+          }
+        ]
+      }
+
+      assert {:ok, "[image: the-file]"} = Client.render_adf_for_test(adf_title)
+
+      adf_none = %{
+        "type" => "doc",
+        "version" => 1,
+        "content" => [
+          %{
+            "type" => "paragraph",
+            "content" => [%{"type" => "media", "attrs" => %{}}]
+          }
+        ]
+      }
+
+      assert {:ok, "[image: file]"} = Client.render_adf_for_test(adf_none)
+    end
+
+    test "mention/emoji/status/date placeholders render per SPEC §11.4" do
+      adf = %{
+        "type" => "doc",
+        "version" => 1,
+        "content" => [
+          %{
+            "type" => "paragraph",
+            "content" => [
+              %{"type" => "mention", "attrs" => %{"text" => "Alice"}},
+              %{"type" => "text", "text" => " "},
+              %{"type" => "emoji", "attrs" => %{"shortName" => ":thumbsup:"}},
+              %{"type" => "text", "text" => " "},
+              %{"type" => "status", "attrs" => %{"text" => "In Progress"}},
+              %{"type" => "text", "text" => " "},
+              %{"type" => "date", "attrs" => %{"timestamp" => "1700000000000"}}
+            ]
+          }
+        ]
+      }
+
+      assert {:ok, rendered} = Client.render_adf_for_test(adf)
+      assert rendered =~ "@Alice"
+      assert rendered =~ ":thumbsup:"
+      assert rendered =~ "[In Progress]"
+      assert rendered =~ "2023-"
+    end
+
+    test "panel node renders with [panel:<panelType>] marker" do
+      adf = %{
+        "type" => "doc",
+        "version" => 1,
+        "content" => [
+          %{
+            "type" => "panel",
+            "attrs" => %{"panelType" => "info"},
+            "content" => [
+              %{
+                "type" => "paragraph",
+                "content" => [%{"type" => "text", "text" => "note"}]
+              }
+            ]
+          }
+        ]
+      }
+
+      assert {:ok, rendered} = Client.render_adf_for_test(adf)
+      assert rendered =~ "[panel:info]"
+      assert rendered =~ "note"
+    end
+
+    test "unknown node recurses into children without marker" do
+      adf = %{
+        "type" => "doc",
+        "version" => 1,
+        "content" => [
+          %{
+            "type" => "paragraph",
+            "content" => [
+              %{
+                "type" => "someUnknownNode",
+                "content" => [%{"type" => "text", "text" => "inner"}]
+              }
+            ]
+          }
+        ]
+      }
+
+      assert {:ok, "inner"} = Client.render_adf_for_test(adf)
+    end
+
+    test "depth=64 (at cap) returns :ok" do
+      adf = build_deep_adf(64)
+      assert {:ok, _rendered} = Client.render_adf_for_test(adf)
+    end
+
+    test "depth=1000 exceeds cap and returns {:error, :jira_adf_depth_exceeded} (AC-009)" do
+      adf = build_deep_adf(1000)
+      assert {:error, :jira_adf_depth_exceeded} = Client.render_adf_for_test(adf)
+    end
+
+    test "lossy DEBUG log fires once with category counts" do
+      adf = %{
+        "type" => "doc",
+        "version" => 1,
+        "content" => [
+          %{
+            "type" => "paragraph",
+            "content" => [
+              %{"type" => "media", "attrs" => %{"alt" => "a"}},
+              %{"type" => "media", "attrs" => %{"alt" => "b"}},
+              %{"type" => "mention", "attrs" => %{"text" => "Alice"}}
+            ]
+          }
+        ]
+      }
+
+      Logger.configure(level: :debug)
+
+      log =
+        capture_log([level: :debug], fn ->
+          assert {:ok, _} = Client.render_adf_for_test(adf)
+        end)
+
+      assert log =~ "adf_lossy_render"
+      assert log =~ "media=2"
+      assert log =~ "mention=1"
+    end
+
+    defp build_deep_adf(depth) do
+      leaf = %{"type" => "text", "text" => "x"}
+
+      nested =
+        Enum.reduce(1..depth, leaf, fn _, acc ->
+          %{"type" => "paragraph", "content" => [acc]}
+        end)
+
+      %{"type" => "doc", "version" => 1, "content" => [nested]}
+    end
+  end
+
+  describe "render_adf_for_test/1 URL-scheme filter (T058, FR-020, NFR-SEC-005, AC-010)" do
+    test "http and https inlineCard/blockCard URLs pass through as <url>" do
+      adf = %{
+        "type" => "doc",
+        "version" => 1,
+        "content" => [
+          %{
+            "type" => "paragraph",
+            "content" => [
+              %{"type" => "inlineCard", "attrs" => %{"url" => "http://example.com/a"}},
+              %{"type" => "text", "text" => " "},
+              %{"type" => "blockCard", "attrs" => %{"url" => "https://example.com/b"}}
+            ]
+          }
+        ]
+      }
+
+      assert {:ok, rendered} = Client.render_adf_for_test(adf)
+      assert rendered =~ "<http://example.com/a>"
+      assert rendered =~ "<https://example.com/b>"
+    end
+
+    test "javascript/file/data/ftp URLs render as [link: filtered] (AC-010)" do
+      for scheme <- [
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "data:text/html,abc",
+            "ftp://x"
+          ] do
+        adf = %{
+          "type" => "doc",
+          "version" => 1,
+          "content" => [
+            %{
+              "type" => "paragraph",
+              "content" => [%{"type" => "inlineCard", "attrs" => %{"url" => scheme}}]
+            }
+          ]
+        }
+
+        assert {:ok, rendered} = Client.render_adf_for_test(adf)
+
+        assert rendered =~ "[link: filtered]",
+               "expected filtered marker for #{scheme}, got: #{inspect(rendered)}"
+
+        refute rendered =~ scheme, "raw URL leaked for #{scheme}"
+      end
     end
   end
 end
