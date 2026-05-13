@@ -207,13 +207,13 @@ description: "Task list for Elixir Jira Adapter (Phase 3 output)"
 
 ### Tests for US7 (RED)
 
-- [ ] T048 [P] [US7] RED test: in `elixir/test/symphony_elixir/jira/client_test.exs`, add test for 401 response → `{:error, :tracker_unauthorized}` (FR-040, FR-041, US7 scenario 1). Assert tuple does NOT contain the token nor `"Basic "` (AC-008).
-- [ ] T049 [P] [US7] RED test: same file, 403 response → `{:error, {:tracker_forbidden, %{project_key: "ENG"}}}` when JQL contains `project = ENG` (FR-040, US7 scenario 2). Assert project key derivation.
-- [ ] T050 [P] [US7] RED test: same file, log-redaction test using `ExUnit.CaptureLog` — drive both 401 and 403 paths; assert `refute log =~ "Basic "` and `refute log =~ "fake-jira-token-not-real"` (FR-043, NFR-SEC-008, AC-008, US7 scenario 3).
+- [x] T048 [P] [US7] RED test: in `elixir/test/symphony_elixir/jira/client_test.exs`, add test for 401 response → `{:error, :tracker_unauthorized}` (FR-040, FR-041, US7 scenario 1). Assert tuple does NOT contain the token nor `"Basic "` (AC-008).
+- [x] T049 [P] [US7] RED test: same file, 403 response → `{:error, {:tracker_forbidden, %{project_key: "ENG"}}}` when JQL contains `project = ENG` (FR-040, US7 scenario 2). Assert project key derivation.
+- [x] T050 [P] [US7] RED test: same file, log-redaction test using `ExUnit.CaptureLog` — drive both 401 and 403 paths; assert `refute log =~ "Basic "` and `refute log =~ "fake-jira-token-not-real"` (FR-043, NFR-SEC-008, AC-008, US7 scenario 3).
 
 ### Implementation for US7 (GREEN)
 
-- [ ] T051 [US7] GREEN: extend `Jira.Client` error mapping in `elixir/lib/symphony_elixir/jira/client.ex` — map 401 → `:tracker_unauthorized`, 403 → `{:tracker_forbidden, %{project_key: extract_project_key_from_url(url)}}`. Add `extract_project_key_from_url/1` (private). Ensure DEBUG success-path log + ERROR error-path log per FR-044 + FR-045 with NO header values. T048 + T049 + T050 pass.
+- [x] T051 [US7] GREEN: extend `Jira.Client` error mapping in `elixir/lib/symphony_elixir/jira/client.ex` — map 401 → `:tracker_unauthorized`, 403 → `{:tracker_forbidden, %{project_key: <first key from JQL via Config.extract_project_keys/1, or :unknown>}}`. Reuses the literal-aware JQL scanner from US5 rather than parsing the URL. Adds DEBUG success-path log (method + path with no query string + status) and confirms ERROR error-path logs emit only truncated body — NEVER request headers, per FR-044 + FR-045. T048 + T049 + T050 pass.
 
 **Checkpoint US7**: 401/403 properly classified; no token in logs or error tuples.
 
