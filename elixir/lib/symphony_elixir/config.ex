@@ -137,9 +137,8 @@ defmodule SymphonyElixir.Config do
   end
 
   defp validate_linear_semantics(tracker) do
-    with :ok <- validate_linear_flat_nested_keys(tracker),
-         :ok <- validate_linear_required_fields(tracker) do
-      :ok
+    with :ok <- validate_linear_flat_nested_keys(tracker) do
+      validate_linear_required_fields(tracker)
     end
   end
 
@@ -374,13 +373,25 @@ defmodule SymphonyElixir.Config do
   defp parse_project_predicate(input, acc) do
     rest = skip_ws(input)
 
+    case parse_equality_operator(rest, acc) do
+      {:matched, result} -> result
+      :no_match -> parse_in_operator(rest, acc)
+    end
+  end
+
+  # `=` and `!=` both extract a single identifier after the operator.
+  defp parse_equality_operator(<<?=, more::binary>>, acc),
+    do: {:matched, extract_single_ident(more, acc)}
+
+  defp parse_equality_operator(<<?!, ?=, more::binary>>, acc),
+    do: {:matched, extract_single_ident(more, acc)}
+
+  defp parse_equality_operator(_rest, _acc), do: :no_match
+
+  # `in` and `not in` both consume a parenthesised list; `not in` requires the
+  # follow-up `in` token. Anything else returns acc unchanged with rest preserved.
+  defp parse_in_operator(rest, acc) do
     case rest do
-      <<?=, more::binary>> ->
-        extract_single_ident(more, acc)
-
-      <<?!, ?=, more::binary>> ->
-        extract_single_ident(more, acc)
-
       <<i, n, ws, more::binary>>
       when i in [?I, ?i] and n in [?N, ?n] and ws in [?\s, ?\t, ?\n, ?\r] ->
         extract_in_list(<<ws, more::binary>>, acc)

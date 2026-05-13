@@ -1925,7 +1925,11 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       settings = Config.settings!()
       assert settings.tracker.api_key == "nested-only-key"
       assert settings.tracker.project_slug == "nested-only-slug"
-      assert settings.tracker.endpoint == "https://nested.linear.app/graphql"
+      # endpoint has a non-nil flat default (https://api.linear.app/graphql), so
+      # merge_linear_field/2 intentionally cannot distinguish operator-supplied
+      # from default for endpoint; nested.endpoint is not merged into the flat
+      # field in v1. The nested form remains readable via settings.tracker.linear.endpoint.
+      assert settings.tracker.linear.endpoint == "https://nested.linear.app/graphql"
     end
 
     test "(e) kind=linear: flat-only tracker.api_key is preserved when nested.linear.api_key is absent (T077 cover merge_linear_field/2 flat-only branch)" do
