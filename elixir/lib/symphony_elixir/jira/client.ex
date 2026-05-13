@@ -234,7 +234,9 @@ defmodule SymphonyElixir.Jira.Client do
     headers = build_request_headers(jira.email, jira.api_token)
 
     case request_fun.(:get, url, headers, nil) do
-      {:ok, %{status: 200, body: %{"issues" => issues}}} when is_list(issues) ->
+      {:ok, %{status: 200, body: %{"issues" => issues}} = response} when is_list(issues) ->
+        log_request_success(:get, url, response.status)
+
         normalized =
           issues
           |> Enum.map(
@@ -245,7 +247,7 @@ defmodule SymphonyElixir.Jira.Client do
         {:ok, normalized}
 
       {:ok, response} ->
-        classify_error_response(response, url)
+        classify_error_response(response, url, jira.jql)
 
       {:error, reason} ->
         Logger.error("jira_api_request: #{inspect(reason)}")
@@ -253,22 +255,43 @@ defmodule SymphonyElixir.Jira.Client do
     end
   end
 
+  # FR-044: REST success-path logs MUST be DEBUG level — method, path (no
+  # credential-bearing query string), status. Headers MUST NOT be logged.
+  # We strip the entire query string to keep the redaction blanket-safe:
+  # JQL is not a secret but the rule is "no credential-bearing query string"
+  # — easiest path to honor is to log only the path.
+  defp log_request_success(method, url, status) do
+    Logger.debug(
+      "jira_request method=#{method} path=#{request_path(url)} status=#{status}"
+    )
+  end
+
+  defp request_path(url) when is_binary(url) do
+    case URI.parse(url) do
+      %URI{path: path} when is_binary(path) -> path
+      _ -> "<unknown>"
+    end
+  end
+
+  defp request_path(_url), do: "<unknown>"
+
   # Maps non-2xx Jira responses to the typed error catalog. URL-aware: 400 on
   # /rest/api/3/search/jql becomes :jira_invalid_jql (FR-040, US3); 400 on other
   # endpoints falls through to :jira_api_status until those endpoints add their
   # own classifications. The error tuple/log NEVER includes auth headers (FR-042,
-  # NFR-SEC-008) — only the response body excerpt, truncated by summarize_error_body/1.
-  defp classify_error_response(%{status: 200, body: body}, _url) do
+  # FR-045, NFR-SEC-008) — only the response body excerpt, truncated by
+  # summarize_error_body/1 (capped at @max_error_body_log_bytes per FR-045).
+  defp classify_error_response(%{status: 200, body: body}, _url, _jql) do
     Logger.error("jira_unknown_payload body=#{summarize_error_body(body)}")
     {:error, {:jira_unknown_payload, summarize_error_body(body)}}
   end
 
-  defp classify_error_response(%{status: status}, _url) when status in 300..399 do
+  defp classify_error_response(%{status: status}, _url, _jql) when status in 300..399 do
     Logger.error("jira_unexpected_redirect status=#{status}")
     {:error, {:jira_unexpected_redirect, status}}
   end
 
-  defp classify_error_response(%{status: 400, body: body}, url) do
+  defp classify_error_response(%{status: 400, body: body}, url, _jql) do
     if search_jql_path?(url) do
       Logger.error("jira_invalid_jql body=#{summarize_error_body(body)}")
       {:error, {:jira_invalid_jql, summarize_error_body(body)}}
@@ -278,20 +301,36 @@ defmodule SymphonyElixir.Jira.Client do
     end
   end
 
-  defp classify_error_response(%{status: 401}, _url) do
+  # FR-040 / FR-041 — 401 maps to :tracker_unauthorized; MUST NOT be
+  # conflated with :missing_tracker_config or :jira_api_status. The log
+  # line is the literal atom name only — no headers, no token (FR-043).
+  defp classify_error_response(%{status: 401}, _url, _jql) do
     Logger.error("tracker_unauthorized: jira")
     {:error, :tracker_unauthorized}
   end
 
-  defp classify_error_response(%{status: 403}, _url) do
-    Logger.error("tracker_forbidden: jira")
-    {:error, {:tracker_forbidden, %{project_key: nil}}}
+  # FR-040 — 403 maps to :tracker_forbidden with the FIRST project key the
+  # JQL touches (or :unknown when none derivable). Reuses
+  # Config.extract_project_keys/1 (literal-aware) from US5.
+  defp classify_error_response(%{status: 403}, _url, jql) do
+    project_key = first_project_key(jql)
+    Logger.error("tracker_forbidden: jira project_key=#{inspect(project_key)}")
+    {:error, {:tracker_forbidden, %{project_key: project_key}}}
   end
 
-  defp classify_error_response(%{status: status, body: body}, _url) do
+  defp classify_error_response(%{status: status, body: body}, _url, _jql) do
     Logger.error("jira_api_status=#{status} body=#{summarize_error_body(body)}")
     {:error, {:jira_api_status, status}}
   end
+
+  defp first_project_key(jql) when is_binary(jql) do
+    case Config.extract_project_keys(jql) do
+      [first | _] -> first
+      [] -> :unknown
+    end
+  end
+
+  defp first_project_key(_jql), do: :unknown
 
   defp search_jql_path?(url) when is_binary(url) do
     case URI.parse(url) do
