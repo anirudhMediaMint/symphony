@@ -381,4 +381,22 @@ defmodule SymphonyElixir.Jira.ClientTest do
       assert Client.apply_priority_map_for_test(nil, %{}) == nil
     end
   end
+
+  describe "apply_priority_map_for_test/2 with operator-supplied map (T045, US6, FR-016)" do
+    test "custom priority_map takes precedence over the default with case-sensitive lookup" do
+      custom = %{"P0" => 1, "P1" => 2}
+
+      # Known name in custom map — returns mapped value.
+      assert Client.apply_priority_map_for_test("P1", custom) == 2
+      assert Client.apply_priority_map_for_test("P0", custom) == 1
+
+      # Unknown name (not in custom map) — returns nil, no fallback to default
+      # map, even though "Critical" would otherwise be a valid Jira priority.
+      assert Client.apply_priority_map_for_test("Critical", custom) == nil
+
+      # FR-016 case-sensitive: "p1" does NOT match "P1" key.
+      assert Client.apply_priority_map_for_test("p1", %{"P1" => 2}) == nil
+    end
+  end
+
 end
