@@ -685,4 +685,92 @@ defmodule SymphonyElixir.Jira.ClientTest do
                Client.fetch_candidate_issues(request_fun: fake_403)
     end
   end
+
+  describe "fetch_candidate_issues/1 log redaction on 401/403 (T050, US7, FR-043, NFR-SEC-008, AC-008)" do
+    setup do
+      env_var = "JIRA_API_TOKEN_T050_#{System.unique_integer([:positive])}"
+      previous = System.get_env(env_var)
+      System.put_env(env_var, "fake-jira-token-not-real")
+
+      on_exit(fn ->
+        case previous do
+          nil -> System.delete_env(env_var)
+          val -> System.put_env(env_var, val)
+        end
+      end)
+
+      workflow_root =
+        Path.join(
+          System.tmp_dir!(),
+          "symphony-elixir-jira-client-test-t050-#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(workflow_root)
+      workflow_file = Path.join(workflow_root, "WORKFLOW.md")
+
+      File.write!(workflow_file, """
+      ---
+      tracker:
+        kind: "jira"
+        active_states: ["Todo", "In Progress"]
+        terminal_states: ["Closed", "Done"]
+        jira:
+          base_url: "https://jira.test"
+          email: "dev@example.com"
+          api_token: "$#{env_var}"
+          jql: "project = ENG"
+      polling:
+        interval_ms: 30000
+      ---
+      You are an agent for this repository.
+      """)
+
+      SymphonyElixir.Workflow.set_workflow_file_path(workflow_file)
+
+      if Process.whereis(SymphonyElixir.WorkflowStore) do
+        try do
+          SymphonyElixir.WorkflowStore.force_reload()
+        catch
+          :exit, _ -> :ok
+        end
+      end
+
+      on_exit(fn ->
+        Application.delete_env(:symphony_elixir, :workflow_file_path)
+        File.rm_rf(workflow_root)
+      end)
+
+      :ok
+    end
+
+    test "401 path — log MUST NOT contain the API token or Basic-auth blob" do
+      fake_401 = fn :get, _url, _headers, _body ->
+        {:ok, %{status: 401, body: ~s({"errorMessages":["Unauthorized"]})}}
+      end
+
+      log =
+        capture_log(fn ->
+          assert {:error, :tracker_unauthorized} =
+                   Client.fetch_candidate_issues(request_fun: fake_401)
+        end)
+
+      refute log =~ "Basic "
+      refute log =~ "fake-jira-token-not-real"
+    end
+
+    test "403 path — log MUST NOT contain the API token or Basic-auth blob" do
+      fake_403 = fn :get, _url, _headers, _body ->
+        {:ok, %{status: 403, body: ~s({"errorMessages":["Forbidden"]})}}
+      end
+
+      log =
+        capture_log(fn ->
+          assert {:error, {:tracker_forbidden, _}} =
+                   Client.fetch_candidate_issues(request_fun: fake_403)
+        end)
+
+      refute log =~ "Basic "
+      refute log =~ "fake-jira-token-not-real"
+    end
+  end
 end
