@@ -1,6 +1,10 @@
-defmodule SymphonyElixir.Linear.Issue do
+defmodule SymphonyElixir.Tracker.Issue do
   @moduledoc """
-  Normalized Linear issue representation used by the orchestrator.
+  Normalized tracker issue representation used by the orchestrator.
+
+  Sourced from any tracker adapter (Linear, Jira, in-memory). The `description`
+  field accepts a string, a map (e.g. Jira ADF), or `nil` so adapters can pass
+  rich-text payloads through when `tracker.<kind>.description_format` requests it.
   """
 
   defstruct [
@@ -24,7 +28,7 @@ defmodule SymphonyElixir.Linear.Issue do
           id: String.t() | nil,
           identifier: String.t() | nil,
           title: String.t() | nil,
-          description: String.t() | nil,
+          description: String.t() | map() | nil,
           priority: integer() | nil,
           state: String.t() | nil,
           branch_name: String.t() | nil,

@@ -44,6 +44,64 @@ defmodule SymphonyElixir.Config.Schema do
 
     @primary_key false
 
+    defmodule Linear do
+      @moduledoc false
+      use Ecto.Schema
+      import Ecto.Changeset
+
+      @primary_key false
+
+      embedded_schema do
+        field(:endpoint, :string, default: "https://api.linear.app/graphql")
+        field(:api_key, :string)
+        field(:project_slug, :string)
+      end
+
+      @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+      def changeset(schema, attrs) do
+        schema
+        |> cast(attrs, [:endpoint, :api_key, :project_slug], empty_values: [])
+      end
+    end
+
+    defmodule Jira do
+      @moduledoc false
+      use Ecto.Schema
+      import Ecto.Changeset
+
+      @primary_key false
+
+      embedded_schema do
+        field(:base_url, :string)
+        field(:email, :string)
+        field(:api_token, :string)
+        field(:jql, :string)
+        field(:priority_map, :map, default: %{})
+        field(:max_issues_per_poll, :integer, default: 200)
+        field(:allow_aggressive_polling, :boolean, default: false)
+        field(:description_format, :string, default: "text")
+      end
+
+      @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+      def changeset(schema, attrs) do
+        schema
+        |> cast(
+          attrs,
+          [
+            :base_url,
+            :email,
+            :api_token,
+            :jql,
+            :priority_map,
+            :max_issues_per_poll,
+            :allow_aggressive_polling,
+            :description_format
+          ],
+          empty_values: []
+        )
+      end
+    end
+
     embedded_schema do
       field(:kind, :string)
       field(:endpoint, :string, default: "https://api.linear.app/graphql")
@@ -52,6 +110,8 @@ defmodule SymphonyElixir.Config.Schema do
       field(:assignee, :string)
       field(:active_states, {:array, :string}, default: ["Todo", "In Progress"])
       field(:terminal_states, {:array, :string}, default: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"])
+      embeds_one(:linear, Linear, on_replace: :update, defaults_to_struct: true)
+      embeds_one(:jira, Jira, on_replace: :update, defaults_to_struct: true)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -62,6 +122,8 @@ defmodule SymphonyElixir.Config.Schema do
         [:kind, :endpoint, :api_key, :project_slug, :assignee, :active_states, :terminal_states],
         empty_values: []
       )
+      |> cast_embed(:linear, with: &Linear.changeset/2)
+      |> cast_embed(:jira, with: &Jira.changeset/2)
     end
   end
 
@@ -366,10 +428,29 @@ defmodule SymphonyElixir.Config.Schema do
   end
 
   defp finalize_settings(settings) do
+    jira = finalize_jira_tracker(settings.tracker.jira)
+
+    # FR-029: when both flat and nested Linear keys carry the same value,
+    # nested wins. The orchestrator still reads flat
+    # settings.tracker.api_key / project_slug, so merge nested into flat when
+    # the flat field is absent OR identical (Config.validate!/0 separately
+    # surfaces a conflict tuple when the two diverge).
+    nested_linear = settings.tracker.linear
+    nested_api_key = nested_linear && nested_linear.api_key
+    nested_project_slug = nested_linear && nested_linear.project_slug
+    nested_endpoint = nested_linear && nested_linear.endpoint
+
+    merged_api_key = merge_linear_field(settings.tracker.api_key, nested_api_key)
+    merged_project_slug = merge_linear_field(settings.tracker.project_slug, nested_project_slug)
+    merged_endpoint = merge_linear_field(settings.tracker.endpoint, nested_endpoint)
+
     tracker = %{
       settings.tracker
-      | api_key: resolve_secret_setting(settings.tracker.api_key, System.get_env("LINEAR_API_KEY")),
-        assignee: resolve_secret_setting(settings.tracker.assignee, System.get_env("LINEAR_ASSIGNEE"))
+      | endpoint: merged_endpoint,
+        api_key: resolve_secret_setting(merged_api_key, System.get_env("LINEAR_API_KEY")),
+        project_slug: merged_project_slug,
+        assignee: resolve_secret_setting(settings.tracker.assignee, System.get_env("LINEAR_ASSIGNEE")),
+        jira: jira
     }
 
     workspace = %{
@@ -384,6 +465,41 @@ defmodule SymphonyElixir.Config.Schema do
     }
 
     %{settings | tracker: tracker, workspace: workspace, codex: codex}
+  end
+
+  defp finalize_jira_tracker(%Tracker.Jira{} = jira) do
+    %{jira | api_token: resolve_jira_api_token(jira.api_token)}
+  end
+
+  # FR-028, FR-029: merge nested Linear key into the flat field when the flat
+  # field is absent or identical. Divergent values are NOT merged here —
+  # `Config.validate!/0` produces a `:tracker_config_conflict` error in that
+  # case. Returns the value the orchestrator should see.
+  defp merge_linear_field(flat, nil), do: flat
+  defp merge_linear_field(nil, nested), do: nested
+
+  defp merge_linear_field(flat, nested) when is_binary(flat) and is_binary(nested) do
+    if flat == nested, do: nested, else: flat
+  end
+
+  # FR-031: Only `$JIRA_API_TOKEN` (or any `$VAR` reference) is accepted.
+  # Literal tokens in `WORKFLOW.md` resolve to `nil`, which `Config.validate!/0`
+  # then surfaces as `missing_tracker_config: tracker.jira.api_token`.
+  defp resolve_jira_api_token(nil), do: nil
+
+  defp resolve_jira_api_token(value) when is_binary(value) do
+    case env_reference_name(value) do
+      {:ok, env_name} ->
+        case System.get_env(env_name) do
+          nil -> nil
+          "" -> nil
+          resolved -> resolved
+        end
+
+      :error ->
+        # Literal token in WORKFLOW.md — reject per FR-031 by zeroing out.
+        nil
+    end
   end
 
   defp normalize_keys(value) when is_map(value) do

@@ -13,7 +13,7 @@ This directory contains the current Elixir/OTP implementation of Symphony, based
 
 ## How it works
 
-1. Polls Linear for candidate work
+1. Polls the configured tracker (Linear or Jira Cloud) for candidate work
 2. Creates a workspace per issue
 3. Launches Codex in [App Server mode](https://developers.openai.com/codex/app-server/) inside the
    workspace
@@ -21,7 +21,7 @@ This directory contains the current Elixir/OTP implementation of Symphony, based
 5. Keeps Codex working on the issue until the work is done
 
 During app-server sessions, Symphony also serves a client-side `linear_graphql` tool so that repo
-skills can make raw Linear GraphQL calls.
+skills can make raw Linear GraphQL calls (Linear adapter only).
 
 If a claimed issue moves to a terminal state (`Done`, `Closed`, `Cancelled`, or `Duplicate`),
 Symphony stops the active agent for that issue and cleans up matching workspaces.
@@ -30,8 +30,12 @@ Symphony stops the active agent for that issue and cleans up matching workspaces
 
 1. Make sure your codebase is set up to work well with agents: see
    [Harness engineering](https://openai.com/index/harness-engineering/).
-2. Get a new personal token in Linear via Settings → Security & access → Personal API keys, and
-   set it as the `LINEAR_API_KEY` environment variable.
+2. Provision a tracker API token:
+   - **Linear**: Settings → Security & access → Personal API keys; export as `LINEAR_API_KEY`.
+   - **Jira Cloud**: [id.atlassian.com](https://id.atlassian.com) → Account Settings → Security →
+     Create and manage API tokens; export as `JIRA_API_TOKEN`. See
+     [`.specify/specs/jira-adapter/quickstart.md`](../.specify/specs/jira-adapter/quickstart.md)
+     for full operator setup.
 3. Copy this directory's `WORKFLOW.md` to your repo.
 4. Optionally copy the `commit`, `push`, `pull`, `land`, and `linear` skills to your repo.
    - The `linear` skill expects Symphony's `linear_graphql` app-server tool for raw Linear GraphQL
@@ -128,6 +132,11 @@ Notes:
 - If a hook needs `mise exec` inside a freshly cloned workspace, trust the repo config and fetch
   the project dependencies in `hooks.after_create` before invoking `mise` later from other hooks.
 - `tracker.api_key` reads from `LINEAR_API_KEY` when unset or when value is `$LINEAR_API_KEY`.
+- For Jira Cloud, set `tracker.kind: "jira"` and provide the four required keys under
+  `tracker.jira`: `base_url`, `email`, `api_token`, and `jql`. `api_token` reads from
+  `JIRA_API_TOKEN` via the `$JIRA_API_TOKEN` env-var convention (literal tokens are rejected).
+  See [`.specify/specs/jira-adapter/quickstart.md`](../.specify/specs/jira-adapter/quickstart.md)
+  for the full setup walkthrough.
 - For path values, `~` is expanded to the home directory.
 - For env-backed path values, use `$VAR`. `workspace.root` resolves `$VAR` before path handling,
   while `codex.command` stays a shell command string and any `$VAR` expansion there happens in the

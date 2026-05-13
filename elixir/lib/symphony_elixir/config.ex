@@ -3,7 +3,10 @@ defmodule SymphonyElixir.Config do
   Runtime configuration loaded from `WORKFLOW.md`.
   """
 
+  require Logger
+
   alias SymphonyElixir.Config.Schema
+  alias SymphonyElixir.Tracker
   alias SymphonyElixir.Workflow
 
   @default_prompt_template """
@@ -119,19 +122,428 @@ defmodule SymphonyElixir.Config do
       is_nil(settings.tracker.kind) ->
         {:error, :missing_tracker_kind}
 
-      settings.tracker.kind not in ["linear", "memory"] ->
+      settings.tracker.kind not in ["linear", "jira", "memory"] ->
         {:error, {:unsupported_tracker_kind, settings.tracker.kind}}
 
-      settings.tracker.kind == "linear" and not is_binary(settings.tracker.api_key) ->
-        {:error, :missing_linear_api_token}
+      settings.tracker.kind == "linear" ->
+        validate_linear_semantics(settings.tracker)
 
-      settings.tracker.kind == "linear" and not is_binary(settings.tracker.project_slug) ->
-        {:error, :missing_linear_project_slug}
+      settings.tracker.kind == "jira" ->
+        validate_jira_semantics(settings.tracker.jira, settings.polling)
 
       true ->
         :ok
     end
   end
+
+  defp validate_linear_semantics(tracker) do
+    with :ok <- validate_linear_flat_nested_keys(tracker) do
+      validate_linear_required_fields(tracker)
+    end
+  end
+
+  defp validate_jira_semantics(jira, polling) do
+    with :ok <- validate_jira_base_url(jira),
+         :ok <- validate_jira_required_fields(jira),
+         :ok <- validate_jira_poll_interval(jira, polling) do
+      validate_jira_workflow_state_resolvability()
+    end
+  end
+
+  # FR-039: linear-mode missing-field checks only fire when kind == "linear".
+  # Reads the nested-merged value (Linear adapter still reads flat
+  # settings.tracker.api_key / project_slug post-merge — see Schema.finalize_settings/1).
+  defp validate_linear_required_fields(tracker) do
+    cond do
+      not is_binary(tracker.api_key) -> {:error, :missing_linear_api_token}
+      not is_binary(tracker.project_slug) -> {:error, :missing_linear_project_slug}
+      true -> :ok
+    end
+  end
+
+  # FR-028, FR-029, FR-030: flat/nested key compatibility for Linear ONLY.
+  # When BOTH flat (`tracker.<field>`) and nested (`tracker.linear.<field>`)
+  # are present: identical → WARN (FR-029), divergent →
+  # `:tracker_config_conflict` (FR-030). Jira is silently exempt (FR-028).
+  defp validate_linear_flat_nested_keys(tracker) do
+    nested = tracker.linear
+
+    # NOTE: `endpoint` has a non-nil default on BOTH the flat and nested fields,
+    # so we cannot distinguish operator-supplied from default. Only `api_key`
+    # and `project_slug` (no defaults) participate in conflict/redundancy
+    # detection (FR-029, FR-030). Per-field merge still happens in
+    # Config.Schema.finalize_settings/1 for orchestrator back-compat.
+    [
+      {:api_key, tracker.api_key, nested && nested.api_key, :"tracker.api_key",
+       :"tracker.linear.api_key"},
+      {:project_slug, tracker.project_slug, nested && nested.project_slug,
+       :"tracker.project_slug", :"tracker.linear.project_slug"}
+    ]
+    |> Enum.reduce_while(:ok, fn {_field, flat, nested_val, flat_key, nested_key}, _acc ->
+      cond do
+        is_nil(flat) or flat == "" ->
+          {:cont, :ok}
+
+        is_nil(nested_val) or nested_val == "" ->
+          {:cont, :ok}
+
+        flat == nested_val ->
+          Logger.warning(
+            "redundant flat tracker key: #{flat_key} duplicates #{nested_key}; keep only the nested form"
+          )
+
+          {:cont, :ok}
+
+        true ->
+          {:halt, {:error, {:tracker_config_conflict, flat_key, nested_key}}}
+      end
+    end)
+  end
+
+  # FR-032 / NFR-SEC-002: base_url MUST be `https://<host>`. Shape only — no
+  # TLD allowlist (SEC-3 explicit). Trailing slash tolerated by client.
+  defp validate_jira_base_url(jira) do
+    case jira && jira.base_url do
+      url when is_binary(url) ->
+        case URI.parse(url) do
+          %URI{scheme: "https", host: host} when is_binary(host) and host != "" ->
+            :ok
+
+          _ ->
+            {:error, {:missing_tracker_config, :"tracker.jira.base_url"}}
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
+  # FR-037 / US5: invoke the optional adapter callback at preflight time.
+  # Only runs when tracker.kind == "jira"; the caller's `cond` already guards
+  # that. On `{:ok, []}` proceed. On `{:ok, [_ | _]}` fail with the typed
+  # tuple. On `{:error, _}` log WARN and fail-open (transport flake).
+  defp validate_jira_workflow_state_resolvability do
+    case Tracker.validate_state_resolvability() do
+      {:ok, []} ->
+        :ok
+
+      {:ok, unresolved} when is_list(unresolved) ->
+        {:error, {:workflow_state_unresolvable, unresolved}}
+
+      {:error, reason} ->
+        Logger.warning(
+          "workflow_state_resolvability preflight failed; proceeding (fail-open): #{inspect(reason)}"
+        )
+
+        :ok
+    end
+  end
+
+  # FR-036: when tracker.kind == "jira" and polling.interval_ms < 30_000,
+  # require explicit `tracker.jira.allow_aggressive_polling: true` override.
+  # Tuple shape names the configured interval, the 30_000 ms minimum, and
+  # the override key so operators get a one-step fix.
+  defp validate_jira_poll_interval(jira, polling) do
+    minimum_ms = 30_000
+    actual_ms = polling && polling.interval_ms
+    allow = jira && jira.allow_aggressive_polling
+
+    cond do
+      not is_integer(actual_ms) ->
+        :ok
+
+      actual_ms >= minimum_ms ->
+        :ok
+
+      allow == true ->
+        :ok
+
+      true ->
+        {:error,
+         {:jira_poll_interval_too_aggressive, actual_ms, minimum_ms,
+          :"tracker.jira.allow_aggressive_polling"}}
+    end
+  end
+
+  # FR-033: required `tracker.jira.*` fields. Checked in declaration order
+  # so the first missing field surfaces — operators fix one error at a time.
+  @jira_required_fields [
+    {:base_url, :"tracker.jira.base_url"},
+    {:email, :"tracker.jira.email"},
+    {:api_token, :"tracker.jira.api_token"},
+    {:jql, :"tracker.jira.jql"}
+  ]
+
+  defp validate_jira_required_fields(jira) do
+    case Enum.find(@jira_required_fields, fn {field, _label} ->
+           not present?(jira && Map.get(jira, field))
+         end) do
+      {_field, label} -> {:error, {:missing_tracker_config, label}}
+      nil -> validate_jql_no_order_by(jira.jql)
+    end
+  end
+
+  # FR-035 / AC-011 / research.md R-3:
+  # Reject `ORDER BY` (case-insensitive) appearing outside a JQL string literal.
+  # Hand-rolled state machine — Regex.match? is explicitly forbidden by FR-035
+  # because a naive regex flags legitimate substrings like `summary ~ "ORDER BY"`.
+  #
+  # Modes: :default | :double_string | :single_string
+  # Escape policy: `\\` (one literal backslash) followed by `\\` is an escape pair
+  # consumed as data; any other backslash is regular data. Therefore `\"` inside
+  # a double-quoted literal CLOSES the literal (the `\` is data; the `"` matches).
+  defp validate_jql_no_order_by(jql) when is_binary(jql) do
+    scan_jql(jql, :default)
+  end
+
+  defp validate_jql_no_order_by(_jql), do: :ok
+
+  @doc """
+  Extracts distinct project keys referenced by a JQL string.
+
+  Literal-aware: identifiers inside `"..."` or `'...'` string literals are
+  ignored (e.g. `summary ~ "PROJ"` does NOT yield `PROJ`). Reuses the same
+  string-literal recognition shape as `validate_jql_no_order_by/1` (research.md
+  R-3) so the two preflights stay consistent.
+
+  Recognized forms (case-insensitive `project` keyword):
+    * `project = KEY` / `project != KEY`
+    * `project in (K1, K2, ...)` / `project not in (...)`
+
+  Returns a list of unique uppercase-or-mixed-case identifiers in
+  declaration order.
+  """
+  @spec extract_project_keys(String.t()) :: [String.t()]
+  def extract_project_keys(jql) when is_binary(jql) do
+    jql
+    |> scan_project_keys(:default, [])
+    |> Enum.reverse()
+    |> Enum.uniq()
+  end
+
+  def extract_project_keys(_jql), do: []
+
+  # Scanner: same string-literal modes as scan_jql/2. In :default mode, after
+  # seeing the case-insensitive `project` keyword followed by whitespace, we
+  # consume the operator and value(s) and emit identifiers.
+  defp scan_project_keys(<<>>, _mode, acc), do: acc
+
+  defp scan_project_keys(<<?", rest::binary>>, :default, acc),
+    do: scan_project_keys(rest, :double_string, acc)
+
+  defp scan_project_keys(<<?', rest::binary>>, :default, acc),
+    do: scan_project_keys(rest, :single_string, acc)
+
+  defp scan_project_keys(<<p, r, o, j, e, c, t, ws, rest::binary>>, :default, acc)
+       when p in [?P, ?p] and r in [?R, ?r] and o in [?O, ?o] and j in [?J, ?j] and
+              e in [?E, ?e] and c in [?C, ?c] and t in [?T, ?t] and
+              ws in [?\s, ?\t, ?\n, ?\r] do
+    # Word-boundary check: previous-char check is implicit (start-of-input or a
+    # non-identifier char consumed before). The trailing `ws` enforces the
+    # right boundary so `projects` does not match.
+    {new_acc, after_value} = parse_project_predicate(rest, acc)
+    scan_project_keys(after_value, :default, new_acc)
+  end
+
+  defp scan_project_keys(<<_ch, rest::binary>>, :default, acc),
+    do: scan_project_keys(rest, :default, acc)
+
+  defp scan_project_keys(<<?\\, ?\\, rest::binary>>, :double_string, acc),
+    do: scan_project_keys(rest, :double_string, acc)
+
+  defp scan_project_keys(<<?", rest::binary>>, :double_string, acc),
+    do: scan_project_keys(rest, :default, acc)
+
+  defp scan_project_keys(<<_ch, rest::binary>>, :double_string, acc),
+    do: scan_project_keys(rest, :double_string, acc)
+
+  defp scan_project_keys(<<?\\, ?\\, rest::binary>>, :single_string, acc),
+    do: scan_project_keys(rest, :single_string, acc)
+
+  defp scan_project_keys(<<?', rest::binary>>, :single_string, acc),
+    do: scan_project_keys(rest, :default, acc)
+
+  defp scan_project_keys(<<_ch, rest::binary>>, :single_string, acc),
+    do: scan_project_keys(rest, :single_string, acc)
+
+  # Sits immediately after `project<ws>`. Skip extra whitespace, then dispatch
+  # on operator: `=`/`!=` → single ident; `in`/`not in` → parenthesised list.
+  # Any unrecognized operator returns acc unchanged with rest preserved so the
+  # outer scanner keeps walking.
+  defp parse_project_predicate(input, acc) do
+    rest = skip_ws(input)
+
+    case parse_equality_operator(rest, acc) do
+      {:matched, result} -> result
+      :no_match -> parse_in_operator(rest, acc)
+    end
+  end
+
+  # `=` and `!=` both extract a single identifier after the operator.
+  defp parse_equality_operator(<<?=, more::binary>>, acc),
+    do: {:matched, extract_single_ident(more, acc)}
+
+  defp parse_equality_operator(<<?!, ?=, more::binary>>, acc),
+    do: {:matched, extract_single_ident(more, acc)}
+
+  defp parse_equality_operator(_rest, _acc), do: :no_match
+
+  # `in` and `not in` both consume a parenthesised list; `not in` requires the
+  # follow-up `in` token. Anything else returns acc unchanged with rest preserved.
+  defp parse_in_operator(rest, acc) do
+    case rest do
+      <<i, n, ws, more::binary>>
+      when i in [?I, ?i] and n in [?N, ?n] and ws in [?\s, ?\t, ?\n, ?\r] ->
+        extract_in_list(<<ws, more::binary>>, acc)
+
+      <<n, o, t, ws, more::binary>>
+      when n in [?N, ?n] and o in [?O, ?o] and t in [?T, ?t] and
+             ws in [?\s, ?\t, ?\n, ?\r] ->
+        parse_not_in_predicate(<<ws, more::binary>>, rest, acc)
+
+      _ ->
+        {acc, rest}
+    end
+  end
+
+  # Sub-case for `NOT IN (...)` after the leading `NOT` token has been matched.
+  # Returns `{acc, original_rest}` unchanged when the trailing `IN` is missing.
+  defp parse_not_in_predicate(after_not_raw, original_rest, acc) do
+    case skip_ws(after_not_raw) do
+      <<i, n2, ws2, in_more::binary>>
+      when i in [?I, ?i] and n2 in [?N, ?n] and ws2 in [?\s, ?\t, ?\n, ?\r] ->
+        extract_in_list(<<ws2, in_more::binary>>, acc)
+
+      _ ->
+        {acc, original_rest}
+    end
+  end
+
+  defp extract_single_ident(input, acc) do
+    rest = skip_ws(input)
+
+    case rest do
+      # Quoted value — Jira accepts "KEY" but we ignore quoted forms here
+      # because the literal-aware scanner already handles them as data. Skip
+      # past the closing quote to keep the outer scanner aligned.
+      <<?", _::binary>> ->
+        {acc, rest}
+
+      <<?', _::binary>> ->
+        {acc, rest}
+
+      _ ->
+        case take_ident(rest, <<>>) do
+          {"", after_ident} -> {acc, after_ident}
+          {ident, after_ident} -> {[ident | acc], after_ident}
+        end
+    end
+  end
+
+  defp extract_in_list(input, acc) do
+    rest = skip_ws(input)
+
+    case rest do
+      <<?(, more::binary>> -> collect_in_idents(more, acc)
+      _ -> {acc, rest}
+    end
+  end
+
+  defp collect_in_idents(<<>>, acc), do: {acc, <<>>}
+  defp collect_in_idents(<<?), rest::binary>>, acc), do: {acc, rest}
+
+  defp collect_in_idents(<<ws, rest::binary>>, acc)
+       when ws in [?\s, ?\t, ?\n, ?\r, ?,],
+       do: collect_in_idents(rest, acc)
+
+  # Skip quoted values in IN-lists (they're not bare project keys).
+  defp collect_in_idents(<<?", rest::binary>>, acc) do
+    rest |> skip_until_quote(?") |> collect_in_idents(acc)
+  end
+
+  defp collect_in_idents(<<?', rest::binary>>, acc) do
+    rest |> skip_until_quote(?') |> collect_in_idents(acc)
+  end
+
+  defp collect_in_idents(input, acc) do
+    case take_ident(input, <<>>) do
+      {"", <<_, rest::binary>>} -> collect_in_idents(rest, acc)
+      {"", <<>>} -> {acc, <<>>}
+      {ident, after_ident} -> collect_in_idents(after_ident, [ident | acc])
+    end
+  end
+
+  defp skip_until_quote(<<>>, _q), do: <<>>
+  defp skip_until_quote(<<?\\, ?\\, rest::binary>>, q), do: skip_until_quote(rest, q)
+  defp skip_until_quote(<<q, rest::binary>>, q), do: rest
+  defp skip_until_quote(<<_ch, rest::binary>>, q), do: skip_until_quote(rest, q)
+
+  defp take_ident(<<ch, rest::binary>>, acc)
+       when ch in ?A..?Z or ch in ?a..?z or ch in ?0..?9 or ch == ?_ or ch == ?- do
+    take_ident(rest, <<acc::binary, ch>>)
+  end
+
+  defp take_ident(rest, acc), do: {acc, rest}
+
+  defp skip_ws(<<ws, rest::binary>>) when ws in [?\s, ?\t, ?\n, ?\r], do: skip_ws(rest)
+  defp skip_ws(rest), do: rest
+
+  # End of input — no ORDER BY found.
+  defp scan_jql(<<>>, _mode), do: :ok
+
+  # In :default mode, enter a string on a quote.
+  defp scan_jql(<<?", rest::binary>>, :default), do: scan_jql(rest, :double_string)
+  defp scan_jql(<<?', rest::binary>>, :default), do: scan_jql(rest, :single_string)
+
+  # In :default mode, look for case-insensitive ORDER followed by 1+ whitespace
+  # chars followed by BY. Consume one char at a time on miss so retries advance.
+  defp scan_jql(<<o, r1, d, e, r2, ws, rest::binary>>, :default)
+       when o in [?O, ?o] and r1 in [?R, ?r] and d in [?D, ?d] and e in [?E, ?e] and
+              r2 in [?R, ?r] and ws in [?\s, ?\t, ?\n, ?\r] do
+    case skip_whitespace_then_by(rest) do
+      {:match, fragment_tail} ->
+        {:error,
+         {:jql_order_by_not_allowed,
+          <<o, r1, d, e, r2, ws>> <> fragment_tail}}
+
+      :no_match ->
+        scan_jql(<<r1, d, e, r2, ws, rest::binary>>, :default)
+    end
+  end
+
+  defp scan_jql(<<_ch, rest::binary>>, :default), do: scan_jql(rest, :default)
+
+  # In :double_string mode — `\\` (backslash + backslash) is a data escape;
+  # any other char including `\"` treats `\` as plain data, so `"` still closes.
+  defp scan_jql(<<?\\, ?\\, rest::binary>>, :double_string),
+    do: scan_jql(rest, :double_string)
+
+  defp scan_jql(<<?", rest::binary>>, :double_string), do: scan_jql(rest, :default)
+  defp scan_jql(<<_ch, rest::binary>>, :double_string), do: scan_jql(rest, :double_string)
+
+  # In :single_string mode — same escape policy as double-string.
+  defp scan_jql(<<?\\, ?\\, rest::binary>>, :single_string),
+    do: scan_jql(rest, :single_string)
+
+  defp scan_jql(<<?', rest::binary>>, :single_string), do: scan_jql(rest, :default)
+  defp scan_jql(<<_ch, rest::binary>>, :single_string), do: scan_jql(rest, :single_string)
+
+  # After consuming `ORDER<ws>`, look for one or more whitespace chars (already
+  # consumed one) followed by case-insensitive `BY`. Returns {:match, tail} or
+  # :no_match. `tail` is up to 20 chars of context for the error fragment.
+  defp skip_whitespace_then_by(<<ws, rest::binary>>) when ws in [?\s, ?\t, ?\n, ?\r] do
+    skip_whitespace_then_by(rest)
+  end
+
+  defp skip_whitespace_then_by(<<b, y, rest::binary>>)
+       when b in [?B, ?b] and y in [?Y, ?y] do
+    {:match, <<b, y>> <> String.slice(rest, 0, 20)}
+  end
+
+  defp skip_whitespace_then_by(_other), do: :no_match
+
+  defp present?(value) when is_binary(value), do: String.trim(value) != ""
+  defp present?(_value), do: false
 
   defp format_config_error(reason) do
     case reason do

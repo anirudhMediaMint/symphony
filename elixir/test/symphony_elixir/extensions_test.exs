@@ -9,6 +9,42 @@ defmodule SymphonyElixir.ExtensionsTest do
 
   @endpoint SymphonyElixirWeb.Endpoint
 
+  defmodule FakeJiraClient do
+    def fetch_candidate_issues do
+      send(self(), :fake_jira_fetch_candidate_issues_called)
+      {:ok, [%SymphonyElixir.Tracker.Issue{id: "10001", identifier: "ENG-1"}]}
+    end
+
+    def fetch_issues_by_states(states) do
+      send(self(), {:fake_jira_fetch_issues_by_states_called, states})
+      {:ok, []}
+    end
+
+    def fetch_issue_states_by_ids(ids) do
+      send(self(), {:fake_jira_fetch_issue_states_by_ids_called, ids})
+      {:ok, []}
+    end
+
+    def create_comment(issue_id, body) do
+      send(self(), {:fake_jira_create_comment_called, issue_id, body})
+      :ok
+    end
+
+    def update_issue_state(issue_id, state) do
+      send(self(), {:fake_jira_update_issue_state_called, issue_id, state})
+      :ok
+    end
+
+    def validate_state_resolvability_for(state_names) do
+      send(self(), {:fake_jira_validate_state_resolvability_for_called, state_names})
+
+      case Process.get({__MODULE__, :validate_state_resolvability_for}) do
+        fun when is_function(fun, 1) -> fun.(state_names)
+        _ -> {:ok, []}
+      end
+    end
+  end
+
   defmodule FakeLinearClient do
     def fetch_candidate_issues do
       send(self(), :fetch_candidate_issues_called)
@@ -79,12 +115,19 @@ defmodule SymphonyElixir.ExtensionsTest do
 
   setup do
     linear_client_module = Application.get_env(:symphony_elixir, :linear_client_module)
+    jira_client_module = Application.get_env(:symphony_elixir, :jira_client_module)
 
     on_exit(fn ->
       if is_nil(linear_client_module) do
         Application.delete_env(:symphony_elixir, :linear_client_module)
       else
         Application.put_env(:symphony_elixir, :linear_client_module, linear_client_module)
+      end
+
+      if is_nil(jira_client_module) do
+        Application.delete_env(:symphony_elixir, :jira_client_module)
+      else
+        Application.put_env(:symphony_elixir, :jira_client_module, jira_client_module)
       end
     end)
 
@@ -203,6 +246,151 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "linear")
     assert SymphonyElixir.Tracker.adapter() == Adapter
+  end
+
+  test "tracker.adapter/0 routes tracker.kind: \"jira\" to Jira.Adapter" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "jira")
+
+    assert Config.settings!().tracker.kind == "jira"
+    assert SymphonyElixir.Tracker.adapter() == SymphonyElixir.Jira.Adapter
+  end
+
+  test "hot-reload from Linear to Jira swaps Tracker.adapter/0 on next call (US2, FR-002, NFR-PERF-005)" do
+    ensure_workflow_store_running()
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "linear")
+
+    assert Config.settings!().tracker.kind == "linear"
+    assert SymphonyElixir.Tracker.adapter() == Adapter
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "jira")
+    assert :ok = WorkflowStore.force_reload()
+
+    assert Config.settings!().tracker.kind == "jira"
+    assert SymphonyElixir.Tracker.adapter() == SymphonyElixir.Jira.Adapter
+  end
+
+  test "in-flight Linear Tracker.Issue remains valid after hot-reload to Jira (US2)" do
+    ensure_workflow_store_running()
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "linear")
+    assert SymphonyElixir.Tracker.adapter() == Adapter
+
+    # Simulate an in-flight worker that captured an Issue under the Linear adapter.
+    in_flight = %Issue{id: "issue-flight", identifier: "MT-9", state: "In Progress"}
+
+    # Operator swaps WORKFLOW.md to Jira mid-flight.
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "jira")
+    assert :ok = WorkflowStore.force_reload()
+    assert SymphonyElixir.Tracker.adapter() == SymphonyElixir.Jira.Adapter
+
+    # The previously captured Issue struct is unchanged; pattern matching and
+    # field access still work — no crash, no struct corruption.
+    assert %Issue{id: "issue-flight", identifier: "MT-9", state: "In Progress"} = in_flight
+    assert in_flight.id == "issue-flight"
+    assert in_flight.identifier == "MT-9"
+    assert in_flight.state == "In Progress"
+  end
+
+  test "tracker.validate_state_resolvability/0 returns {:ok, []} when the adapter does not implement the callback" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "linear")
+
+    assert SymphonyElixir.Tracker.adapter() == Adapter
+    assert {:ok, []} = SymphonyElixir.Tracker.validate_state_resolvability()
+  end
+
+  test "Jira.Adapter delegates fetch_candidate_issues/0 to the :jira_client_module Application env" do
+    Application.put_env(:symphony_elixir, :jira_client_module, FakeJiraClient)
+
+    assert {:ok, [%Issue{identifier: "ENG-1"}]} =
+             SymphonyElixir.Jira.Adapter.fetch_candidate_issues()
+
+    assert_receive :fake_jira_fetch_candidate_issues_called
+  end
+
+  describe "Jira.Adapter remaining callback delegations (T077, FR-048, NFR-Q-001, AC-005)" do
+    setup do
+      Application.put_env(:symphony_elixir, :jira_client_module, FakeJiraClient)
+      :ok
+    end
+
+    test "fetch_issues_by_states/1 delegates to client_module().fetch_issues_by_states/1" do
+      assert {:ok, []} = SymphonyElixir.Jira.Adapter.fetch_issues_by_states(["Todo", "Done"])
+      assert_receive {:fake_jira_fetch_issues_by_states_called, ["Todo", "Done"]}
+    end
+
+    test "fetch_issue_states_by_ids/1 delegates to client_module().fetch_issue_states_by_ids/1" do
+      assert {:ok, []} = SymphonyElixir.Jira.Adapter.fetch_issue_states_by_ids(["ENG-1", "ENG-2"])
+      assert_receive {:fake_jira_fetch_issue_states_by_ids_called, ["ENG-1", "ENG-2"]}
+    end
+
+    test "create_comment/2 delegates to client_module().create_comment/2" do
+      assert :ok = SymphonyElixir.Jira.Adapter.create_comment("ENG-1", "hello world")
+      assert_receive {:fake_jira_create_comment_called, "ENG-1", "hello world"}
+    end
+
+    test "update_issue_state/2 delegates to client_module().update_issue_state/2" do
+      assert :ok = SymphonyElixir.Jira.Adapter.update_issue_state("ENG-1", "Done")
+      assert_receive {:fake_jira_update_issue_state_called, "ENG-1", "Done"}
+    end
+  end
+
+  test "T040 Jira.Adapter.validate_state_resolvability/0 collects active_states ++ terminal_states (Gate 2 FR-038 substitution), de-dupes, and delegates to the client" do
+    # Gate 2 substitution: FR-038 spec text references a transition-mapping
+    # config surface that does not exist in v1. The adapter's input scope is
+    # tracker.active_states ++ tracker.terminal_states.
+    env_var = "JIRA_API_TOKEN_T040_#{System.unique_integer([:positive])}"
+    previous = System.get_env(env_var)
+    System.put_env(env_var, "fake-jira-token-not-real")
+    on_exit(fn -> restore_env(env_var, previous) end)
+
+    write_workflow_file_jira_t040!(Workflow.workflow_file_path(), env_var)
+
+    Application.put_env(:symphony_elixir, :jira_client_module, FakeJiraClient)
+
+    Process.put(
+      {FakeJiraClient, :validate_state_resolvability_for},
+      fn names ->
+        # Echo back the input so the test can assert collection + de-dup.
+        {:ok, names}
+      end
+    )
+
+    assert {:ok, names} = SymphonyElixir.Jira.Adapter.validate_state_resolvability()
+
+    assert_receive {:fake_jira_validate_state_resolvability_for_called, received}
+
+    # Active + terminal concatenated, in declaration order, with duplicates
+    # removed (case-preserving — "Done" appearing in both lists shows up once).
+    assert received == ["Todo", "In Progress", "Done"]
+    assert names == ["Todo", "In Progress", "Done"]
+  end
+
+  defp write_workflow_file_jira_t040!(path, env_var) do
+    File.write!(path, """
+    ---
+    tracker:
+      kind: "jira"
+      active_states: ["Todo", "In Progress", "Done"]
+      terminal_states: ["Done", "In Progress"]
+      jira:
+        base_url: "https://jira.test"
+        email: "dev@example.com"
+        api_token: "$#{env_var}"
+        jql: "project = ENG"
+    polling:
+      interval_ms: 30000
+    ---
+    You are an agent for this repository.
+    """)
+
+    if Process.whereis(SymphonyElixir.WorkflowStore) do
+      try do
+        SymphonyElixir.WorkflowStore.force_reload()
+      catch
+        :exit, _ -> :ok
+      end
+    end
+
+    :ok
   end
 
   test "linear adapter delegates reads and validates mutation responses" do
