@@ -1854,6 +1854,70 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       refute log =~ "tracker.project_slug"
       refute log =~ "tracker_config_conflict"
     end
+
+    test "(d) kind=linear: nested-only tracker.linear keys merge into flat fields (T077 cover merge_linear_field/2 nested-only branch)" do
+      yaml = """
+      ---
+      tracker:
+        kind: "linear"
+        linear:
+          api_key: "nested-only-key"
+          project_slug: "nested-only-slug"
+          endpoint: "https://nested.linear.app/graphql"
+      polling:
+        interval_ms: 30000
+      workspace:
+        root: "#{Path.join(System.tmp_dir!(), "symphony-nested-only-#{System.unique_integer([:positive])}")}"
+      hooks:
+        timeout_ms: 60000
+      ---
+      You are an agent for this repository.
+      """
+
+      File.write!(Workflow.workflow_file_path(), yaml)
+      if Process.whereis(SymphonyElixir.WorkflowStore), do: WorkflowStore.force_reload()
+
+      assert :ok = Config.validate!()
+
+      settings = Config.settings!()
+      assert settings.tracker.api_key == "nested-only-key"
+      assert settings.tracker.project_slug == "nested-only-slug"
+      assert settings.tracker.endpoint == "https://nested.linear.app/graphql"
+    end
+
+    test "(e) kind=linear: flat-only tracker.api_key is preserved when nested.linear.api_key is absent (T077 cover merge_linear_field/2 flat-only branch)" do
+      yaml = """
+      ---
+      tracker:
+        kind: "linear"
+        api_key: "flat-only-key"
+        project_slug: "flat-only-slug"
+      polling:
+        interval_ms: 30000
+      workspace:
+        root: "#{Path.join(System.tmp_dir!(), "symphony-flat-only-#{System.unique_integer([:positive])}")}"
+      hooks:
+        timeout_ms: 60000
+      ---
+      You are an agent for this repository.
+      """
+
+      File.write!(Workflow.workflow_file_path(), yaml)
+      if Process.whereis(SymphonyElixir.WorkflowStore), do: WorkflowStore.force_reload()
+
+      log =
+        capture_log(fn ->
+          assert :ok = Config.validate!()
+        end)
+
+      # No nested.linear keys present → no redundant-flat WARN, no conflict.
+      refute log =~ "redundant flat tracker key"
+      refute log =~ "tracker_config_conflict"
+
+      settings = Config.settings!()
+      assert settings.tracker.api_key == "flat-only-key"
+      assert settings.tracker.project_slug == "flat-only-slug"
+    end
   end
 
   describe "base_url shape validation (T071, FR-032, NFR-SEC-002)" do
