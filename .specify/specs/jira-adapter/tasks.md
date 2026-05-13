@@ -243,16 +243,16 @@ These FRs do not map cleanly to one user story but are required by spec acceptan
 
 ### Pagination, ADF rendering, edge cases
 
-- [ ] T054 [P] [FR-010, FR-011] RED test: in `elixir/test/symphony_elixir/jira/client_test.exs`, add multi-page pagination test using `request_fun:` injection. First page returns 100 issues + `nextPageToken: "abc"`; second page returns 100 issues + no token. Assert 200 issues returned, second call sends `nextPageToken=abc`, `isLast` is ignored.
-- [ ] T055 [P] [FR-011] RED test: same file, pagination cap test — drive `request_fun:` to return more pages than `max_issues_per_poll: 50`. Assert: (a) result truncates to first 50, (b) WARN log fires with cap, threshold, JQL truncated to 200 chars, (c) `[:symphony, :tracker, :poll_cap_hit]` telemetry event fires with `%{count: 1}` measurements and `%{tracker_kind: :jira}` metadata (attach handler in test, detach in `on_exit`).
-- [ ] T056 [FR-010, FR-011] GREEN: implement `fetch_pages_loop/4` (private) in `elixir/lib/symphony_elixir/jira/client.ex` per research.md R-4: post-decode cap (decode page, check `length(acc) >= max_issues_per_poll`, halt + emit telemetry/WARN). Wire into `fetch_candidate_issues/1`. T054 + T055 pass.
+- [x] T054 [P] [FR-010, FR-011] RED test: in `elixir/test/symphony_elixir/jira/client_test.exs`, add multi-page pagination test using `request_fun:` injection. First page returns 100 issues + `nextPageToken: "abc"`; second page returns 100 issues + no token. Assert 200 issues returned, second call sends `nextPageToken=abc`, `isLast` is ignored.
+- [x] T055 [P] [FR-011] RED test: same file, pagination cap test — drive `request_fun:` to return more pages than `max_issues_per_poll: 50`. Assert: (a) result truncates to first 50, (b) WARN log fires with cap, threshold, JQL truncated to 200 chars, (c) `[:symphony, :tracker, :poll_cap_hit]` telemetry event fires with `%{count: 1}` measurements and `%{tracker_kind: :jira}` metadata (attach handler in test, detach in `on_exit`).
+- [x] T056 [FR-010, FR-011] GREEN: implement `fetch_pages_loop/4` (private) in `elixir/lib/symphony_elixir/jira/client.ex` per research.md R-4: post-decode cap (decode page, check `length(acc) >= max_issues_per_poll`, halt + emit telemetry/WARN). Wire into `fetch_candidate_issues/1`. T054 + T055 pass.
 
-- [ ] T057 [P] [FR-018, FR-019, FR-021, FR-022, AC-009] RED test: in `elixir/test/symphony_elixir/jira/client_test.exs`, add ADF rendering tests against hand-rolled minimal trees (FR-052) — block-sibling separator `\n`, top-level block separator `\n\n`, leaf text scrubbed of ASCII controls (except `\n` and `\t`), placeholder substitutions for `media`/`mention`/`emoji`/`status`/`date`/`panel`, unknown nodes recurse without marker, depth=64 returns OK, depth=1000 returns `{:error, :jira_adf_depth_exceeded}` (AC-009), single DEBUG `adf_lossy_render` line per issue with category counts.
-- [ ] T058 [P] [FR-020, NFR-SEC-005, AC-010] RED test: same file, `inlineCard`/`blockCard` URL-scheme filter — `http`/`https` pass through, `javascript:`/`file:`/`data:`/`ftp:` render as `[link: filtered]` (AC-010).
-- [ ] T059 [FR-018, FR-019, FR-020, FR-021, FR-022] GREEN: implement `render_adf_for_test/1` (and underlying private `render_adf/1` + `render_node/2`) in `elixir/lib/symphony_elixir/jira/client.ex`. Depth-counted recursion at 64; URL-scheme allowlist (`http`, `https`); ASCII-control scrub fn; lossy-category accumulator for DEBUG log. T057 + T058 pass.
+- [x] T057 [P] [FR-018, FR-019, FR-021, FR-022, AC-009] RED test: in `elixir/test/symphony_elixir/jira/client_test.exs`, add ADF rendering tests against hand-rolled minimal trees (FR-052) — block-sibling separator `\n`, top-level block separator `\n\n`, leaf text scrubbed of ASCII controls (except `\n` and `\t`), placeholder substitutions for `media`/`mention`/`emoji`/`status`/`date`/`panel`, unknown nodes recurse without marker, depth=64 returns OK, depth=1000 returns `{:error, :jira_adf_depth_exceeded}` (AC-009), single DEBUG `adf_lossy_render` line per issue with category counts.
+- [x] T058 [P] [FR-020, NFR-SEC-005, AC-010] RED test: same file, `inlineCard`/`blockCard` URL-scheme filter — `http`/`https` pass through, `javascript:`/`file:`/`data:`/`ftp:` render as `[link: filtered]` (AC-010).
+- [x] T059 [FR-018, FR-019, FR-020, FR-021, FR-022] GREEN: implement `render_adf_for_test/1` (and underlying private `render_adf/1` + `render_node/2`) in `elixir/lib/symphony_elixir/jira/client.ex`. Depth-counted recursion at 64; URL-scheme allowlist (`http`, `https`); ASCII-control scrub fn; lossy-category accumulator for DEBUG log. T057 + T058 pass.
 
-- [ ] T060 [P] [FR-023] RED test: in `elixir/test/symphony_elixir/workspace_and_config_test.exs`, add test that `tracker.jira.description_format: "adf"` causes normalization to pass raw ADF map into `Issue.description` (typespec `String.t() | map() | nil`). Default `"text"` triggers rendering.
-- [ ] T061 [FR-023] GREEN: implement description_format branch in `Jira.Client` normalization in `elixir/lib/symphony_elixir/jira/client.ex`. T060 passes.
+- [x] T060 [P] [FR-023] RED test: in `elixir/test/symphony_elixir/workspace_and_config_test.exs`, add test that `tracker.jira.description_format: "adf"` causes normalization to pass raw ADF map into `Issue.description` (typespec `String.t() | map() | nil`). Default `"text"` triggers rendering.
+- [x] T061 [FR-023] GREEN: implement description_format branch in `Jira.Client` normalization in `elixir/lib/symphony_elixir/jira/client.ex`. T060 passes.
 
 ### Issue links + transitions
 
@@ -280,7 +280,7 @@ These FRs do not map cleanly to one user story but are required by spec acceptan
 
 ### Telemetry dep + event registration test
 
-- [ ] T073 [P] [FR-011, telemetry-events contract] RED test: in `elixir/test/symphony_elixir/jira/client_test.exs`, ensure the cap-hit test in T055 verifies exact measurements `%{count: 1}` and metadata `%{tracker_kind: :jira}` (per telemetry-events contract §"Test contract"). If T055 already covers this, mark T073 as covered-by-T055 in the coverage matrix.
+- [x] T073 [P] [FR-011, telemetry-events contract] RED test: in `elixir/test/symphony_elixir/jira/client_test.exs`, ensure the cap-hit test in T055 verifies exact measurements `%{count: 1}` and metadata `%{tracker_kind: :jira}` (per telemetry-events contract §"Test contract"). **Covered by T055** — the cap-hit test attaches a `:telemetry` handler and asserts the exact measurements/metadata shape mandated by the contract.
 
 ---
 
