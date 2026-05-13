@@ -81,6 +81,30 @@ defmodule SymphonyElixir.Jira.Client do
     end
   end
 
+  @doc """
+  Placeholder for reconciliation. Lands in T056 (Phase 11).
+  """
+  @spec fetch_issues_by_states([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_issues_by_states(_states), do: {:error, :not_implemented}
+
+  @doc """
+  Placeholder for reconciliation. Lands in T056 (Phase 11).
+  """
+  @spec fetch_issue_states_by_ids([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_issue_states_by_ids(_ids), do: {:error, :not_implemented}
+
+  @doc """
+  Placeholder for the agent toolchain write-path. Lands in T065 (Phase 11).
+  """
+  @spec create_comment(String.t(), String.t()) :: :ok | {:error, term()}
+  def create_comment(_issue_key, _body), do: {:error, :not_implemented}
+
+  @doc """
+  Placeholder for the agent toolchain write-path. Lands in T065 (Phase 11).
+  """
+  @spec update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}
+  def update_issue_state(_issue_key, _state_name), do: {:error, :not_implemented}
+
   defp do_fetch_candidate_issues(jira, request_fun) do
     url = build_search_url(jira.base_url, jira.jql, jira.max_issues_per_poll)
     headers = build_request_headers(jira.email, jira.api_token)
