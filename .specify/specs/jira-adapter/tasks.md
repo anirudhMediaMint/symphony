@@ -144,11 +144,11 @@ description: "Task list for Elixir Jira Adapter (Phase 3 output)"
 
 ### Tests for US4 (RED)
 
-- [ ] T035 [P] [US4] RED test: in `elixir/test/symphony_elixir/workspace_and_config_test.exs`, add three tests: (a) Jira + `polling.interval_ms: 5000` + no override → `{:error, {:jira_poll_interval_too_aggressive, 5000, 30000, :"tracker.jira.allow_aggressive_polling"}}`; (b) same + override `true` → pass; (c) `tracker.kind: linear` + `polling.interval_ms: 5000` → pass (Jira floor does not fire — FR-036 case 3).
+- [x] T035 [P] [US4] RED test: in `elixir/test/symphony_elixir/workspace_and_config_test.exs`, add three tests: (a) Jira + `polling.interval_ms: 5000` + no override → `{:error, {:jira_poll_interval_too_aggressive, 5000, 30000, :"tracker.jira.allow_aggressive_polling"}}`; (b) same + override `true` → pass; (c) `tracker.kind: linear` + `polling.interval_ms: 5000` → pass (Jira floor does not fire — FR-036 case 3).
 
 ### Implementation for US4 (GREEN)
 
-- [ ] T036 [US4] GREEN: extend `Config.validate!/0` in `elixir/lib/symphony_elixir/config.ex` with `jira_poll_interval_too_aggressive` check (FR-036): only when `tracker.kind == "jira"`, `polling.interval_ms < 30000`, and `tracker.jira.allow_aggressive_polling != true`. T035 passes.
+- [x] T036 [US4] GREEN: extend `Config.validate!/0` in `elixir/lib/symphony_elixir/config.ex` with `jira_poll_interval_too_aggressive` check (FR-036): only when `tracker.kind == "jira"`, `polling.interval_ms < 30000`, and `tracker.jira.allow_aggressive_polling != true`. T035 passes.
 
 **Checkpoint US4**: 30s poll floor enforced at boot, override available, Linear unaffected.
 
