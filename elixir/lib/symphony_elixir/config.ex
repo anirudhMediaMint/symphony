@@ -153,9 +153,78 @@ defmodule SymphonyElixir.Config do
         {:error, {:missing_tracker_config, :"tracker.jira.jql"}}
 
       true ->
-        :ok
+        validate_jql_no_order_by(jira.jql)
     end
   end
+
+  # FR-035 / AC-011 / research.md R-3:
+  # Reject `ORDER BY` (case-insensitive) appearing outside a JQL string literal.
+  # Hand-rolled state machine — Regex.match? is explicitly forbidden by FR-035
+  # because a naive regex flags legitimate substrings like `summary ~ "ORDER BY"`.
+  #
+  # Modes: :default | :double_string | :single_string
+  # Escape policy: `\\` (one literal backslash) followed by `\\` is an escape pair
+  # consumed as data; any other backslash is regular data. Therefore `\"` inside
+  # a double-quoted literal CLOSES the literal (the `\` is data; the `"` matches).
+  defp validate_jql_no_order_by(jql) when is_binary(jql) do
+    scan_jql(jql, :default)
+  end
+
+  defp validate_jql_no_order_by(_jql), do: :ok
+
+  # End of input — no ORDER BY found.
+  defp scan_jql(<<>>, _mode), do: :ok
+
+  # In :default mode, enter a string on a quote.
+  defp scan_jql(<<?", rest::binary>>, :default), do: scan_jql(rest, :double_string)
+  defp scan_jql(<<?', rest::binary>>, :default), do: scan_jql(rest, :single_string)
+
+  # In :default mode, look for case-insensitive ORDER followed by 1+ whitespace
+  # chars followed by BY. Consume one char at a time on miss so retries advance.
+  defp scan_jql(<<o, r1, d, e, r2, ws, rest::binary>>, :default)
+       when o in [?O, ?o] and r1 in [?R, ?r] and d in [?D, ?d] and e in [?E, ?e] and
+              r2 in [?R, ?r] and ws in [?\s, ?\t, ?\n, ?\r] do
+    case skip_whitespace_then_by(rest) do
+      {:match, fragment_tail} ->
+        {:error,
+         {:jql_order_by_not_allowed,
+          <<o, r1, d, e, r2, ws>> <> fragment_tail}}
+
+      :no_match ->
+        scan_jql(<<r1, d, e, r2, ws, rest::binary>>, :default)
+    end
+  end
+
+  defp scan_jql(<<_ch, rest::binary>>, :default), do: scan_jql(rest, :default)
+
+  # In :double_string mode — `\\` (backslash + backslash) is a data escape;
+  # any other char including `\"` treats `\` as plain data, so `"` still closes.
+  defp scan_jql(<<?\\, ?\\, rest::binary>>, :double_string),
+    do: scan_jql(rest, :double_string)
+
+  defp scan_jql(<<?", rest::binary>>, :double_string), do: scan_jql(rest, :default)
+  defp scan_jql(<<_ch, rest::binary>>, :double_string), do: scan_jql(rest, :double_string)
+
+  # In :single_string mode — same escape policy as double-string.
+  defp scan_jql(<<?\\, ?\\, rest::binary>>, :single_string),
+    do: scan_jql(rest, :single_string)
+
+  defp scan_jql(<<?', rest::binary>>, :single_string), do: scan_jql(rest, :default)
+  defp scan_jql(<<_ch, rest::binary>>, :single_string), do: scan_jql(rest, :single_string)
+
+  # After consuming `ORDER<ws>`, look for one or more whitespace chars (already
+  # consumed one) followed by case-insensitive `BY`. Returns {:match, tail} or
+  # :no_match. `tail` is up to 20 chars of context for the error fragment.
+  defp skip_whitespace_then_by(<<ws, rest::binary>>) when ws in [?\s, ?\t, ?\n, ?\r] do
+    skip_whitespace_then_by(rest)
+  end
+
+  defp skip_whitespace_then_by(<<b, y, rest::binary>>)
+       when b in [?B, ?b] and y in [?Y, ?y] do
+    {:match, <<b, y>> <> String.slice(rest, 0, 20)}
+  end
+
+  defp skip_whitespace_then_by(_other), do: :no_match
 
   defp present?(value) when is_binary(value), do: String.trim(value) != ""
   defp present?(_value), do: false

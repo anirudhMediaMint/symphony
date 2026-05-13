@@ -1413,12 +1413,13 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert :ok = Config.validate!()
     end
 
-    test "(d) ORDER BY after backslash-escaped quote in double-quoted literal is OUTSIDE the literal and fails",
+    test "(d) ORDER BY after backslash-escaped quote in double-quoted literal is OUTSIDE the closed literal and fails",
          %{env_var: env_var} do
-      # YAML single-quoted scalar passes through backslashes verbatim, so the
-      # resulting Elixir/JQL string is: summary ~ "escaped \" ORDER BY"
-      # In JQL, \" closes the literal (the scanner sees \\ followed by ", which
-      # is an escape pair inside the string), leaving ORDER BY... outside.
+      # YAML single-quoted scalar passes backslashes verbatim, so the resulting
+      # JQL string is: summary ~ "escaped \" ORDER BY"
+      # The R-3 scanner treats only `\\` (backslash-backslash) as an escape pair;
+      # a lone `\` is data. So `"` after `\` CLOSES the literal, putting
+      # ORDER BY... in :default mode where the check fires.
       write_jira_workflow_file!(Workflow.workflow_file_path(),
         base_url: "https://jira.test",
         email: "dev@example.com",
