@@ -1009,8 +1009,8 @@ defmodule SymphonyElixir.Jira.ClientTest do
         end)
 
       # (c) telemetry event fires with exact measurements + metadata.
-      assert_receive {:telemetry, [:symphony, :tracker, :poll_cap_hit],
-                      %{count: 1}, %{tracker_kind: :jira}}
+      assert_receive {:telemetry, [:symphony, :tracker, :poll_cap_hit], %{count: 1},
+                      %{tracker_kind: :jira}}
 
       # (b) WARN log mentions cap (50), threshold, JQL truncated to ≤200 chars.
       assert log =~ "[warning]" or log =~ "[warn]"
