@@ -3,7 +3,10 @@ defmodule SymphonyElixir.Config do
   Runtime configuration loaded from `WORKFLOW.md`.
   """
 
+  require Logger
+
   alias SymphonyElixir.Config.Schema
+  alias SymphonyElixir.Tracker
   alias SymphonyElixir.Workflow
 
   @default_prompt_template """
@@ -129,11 +132,33 @@ defmodule SymphonyElixir.Config do
         {:error, :missing_linear_project_slug}
 
       settings.tracker.kind == "jira" ->
-        with :ok <- validate_jira_required_fields(settings.tracker.jira) do
-          validate_jira_poll_interval(settings.tracker.jira, settings.polling)
+        with :ok <- validate_jira_required_fields(settings.tracker.jira),
+             :ok <- validate_jira_poll_interval(settings.tracker.jira, settings.polling) do
+          validate_jira_workflow_state_resolvability()
         end
 
       true ->
+        :ok
+    end
+  end
+
+  # FR-037 / US5: invoke the optional adapter callback at preflight time.
+  # Only runs when tracker.kind == "jira"; the caller's `cond` already guards
+  # that. On `{:ok, []}` proceed. On `{:ok, [_ | _]}` fail with the typed
+  # tuple. On `{:error, _}` log WARN and fail-open (transport flake).
+  defp validate_jira_workflow_state_resolvability do
+    case Tracker.validate_state_resolvability() do
+      {:ok, []} ->
+        :ok
+
+      {:ok, unresolved} when is_list(unresolved) ->
+        {:error, {:workflow_state_unresolvable, unresolved}}
+
+      {:error, reason} ->
+        Logger.warning(
+          "workflow_state_resolvability preflight failed; proceeding (fail-open): #{inspect(reason)}"
+        )
+
         :ok
     end
   end
